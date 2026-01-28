@@ -1,0 +1,397 @@
+import hashlib
+import time
+import math
+import random
+import pandas as pd
+import numpy as np
+import qrcode
+from io import BytesIO
+from fpdf import FPDF
+import urllib.parse
+from datetime import datetime
+import shutil
+import os
+
+# --- FEATURE 5: LOYALTY LOGIC ---
+def calculate_loyalty_points(amount):
+    """Earn 1 point for every 100 currency units."""
+    return int(amount // 100)
+
+# --- FEATURE 7: RECOMMENDATION ENGINE ---
+def get_personalized_offer(customer, product_df):
+    """
+    Returns a simple recommendation string based on dummy logic (random category).
+    Real AI would use collaborative filtering here.
+    """
+    if not customer: return "Scan customer to see offers."
+    
+    # Mock Logic: Suggest a product from a random category
+    if not product_df.empty:
+        cats = product_df['category'].unique()
+        fav_cat = random.choice(cats)
+        return f"🌟 Special for you: 10% OFF on all {fav_cat} today!"
+    return "Check out our new arrivals!"
+
+# --- QR CODE GENERATION ---
+def generate_product_qr_image(product_id, product_name):
+    """Generates a QR code image specifically for products."""
+    data = f"PROD:{product_id}" # Simple Format
+    qr = qrcode.QRCode(box_size=10, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf)
+    return buf.getvalue()
+
+def parse_qr_input(data_str):
+    """
+    Parses simulated QR scan input.
+    Expected Format: PROD:<id>
+    """
+    if not data_str: return None
+    try:
+        if data_str.startswith("PROD:"):
+            return int(data_str.split(":")[1])
+    except:
+        return None
+    return None
+
+# --- SOUND FEEDBACK ---
+def get_sound_html(sound_type):
+    """
+    Returns HTML string to play sound.
+    sound_type: 'success' or 'error'
+    """
+    if sound_type == 'success':
+        src = "https://www.soundjay.com/buttons/sounds/button-3.mp3"
+    else:
+        src = "https://www.soundjay.com/buttons/sounds/button-10.mp3"
+        
+    return f"""
+    <audio autoplay>
+        <source src="{src}" type="audio/mpeg">
+    </audio>
+    """
+
+# --- SECURITY & HASHING ---
+def generate_hash(data_string):
+    return hashlib.sha256(data_string.encode()).hexdigest()
+
+def generate_integrity_hash(txn_data):
+    raw_string = f"{txn_data[0]}|{txn_data[1]}|{txn_data[2]}|{txn_data[3]}"
+    return hashlib.sha256(raw_string.encode()).hexdigest()
+
+# --- DATA STRUCTURES: TRIE ---
+class TrieNode:
+    def __init__(self):
+        self.children = {}
+        self.is_end_of_word = False
+        self.data = None
+
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
+
+    def insert(self, word, data):
+        node = self.root
+        for char in word.lower():
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        node.is_end_of_word = True
+        node.data = data
+
+    def search_prefix(self, prefix):
+        node = self.root
+        for char in prefix.lower():
+            if char not in node.children:
+                return []
+            node = node.children[char]
+        return self._collect_words(node)
+
+    def _collect_words(self, node):
+        results = []
+        if node.is_end_of_word:
+            results.append(node.data)
+        for child in node.children.values():
+            results.extend(self._collect_words(child))
+        return results
+
+# --- SEARCH ALGORITHMS ---
+def linear_search(data_list, key, value):
+    """O(n) search"""
+    for item in data_list:
+        if str(item.get(key)).lower() == str(value).lower():
+            return item
+    return None
+
+def binary_search(sorted_list, key, value):
+    """O(log n) search - List must be sorted by key"""
+    low = 0
+    high = len(sorted_list) - 1
+    
+    while low <= high:
+        mid = (low + high) // 2
+        mid_val = sorted_list[mid].get(key)
+        
+        if mid_val < value:
+            low = mid + 1
+        elif mid_val > value:
+            high = mid - 1
+        else:
+            return sorted_list[mid]
+    return None
+
+# --- DATA STRUCTURES: QUEUE SIMULATION ---
+class POSQueueSimulator:
+    def __init__(self):
+        self.queue = [] 
+    
+    def simulate_peak_hour(self, num_customers):
+        wait_times = []
+        service_time_per_customer = 3 
+        
+        for i in range(num_customers):
+            arrival_offset = random.randint(0, 10)
+            wait = (i * service_time_per_customer) + arrival_offset
+            wait_times.append(wait)
+        
+        return {
+            "avg_wait": sum(wait_times)/len(wait_times),
+            "max_queue_length": num_customers,
+            "throughput": num_customers / ((max(wait_times)/60) + 0.1) 
+        }
+
+# --- ALGORITHM: ABC ANALYSIS ---
+def calculate_abc_analysis(df_products):
+    if df_products.empty: return df_products
+    
+    df = df_products.copy()
+    df['inventory_value'] = df['price'] * df['stock']
+    df = df.sort_values('inventory_value', ascending=False)
+    
+    df['cumulative_value'] = df['inventory_value'].cumsum()
+    df['total_value'] = df['inventory_value'].sum()
+    df['cumulative_perc'] = df['cumulative_value'] / df['total_value']
+    
+    def classify(perc):
+        if perc <= 0.70: return 'A (High Value)'
+        elif perc <= 0.90: return 'B (Medium Value)'
+        else: return 'C (Low Value)'
+        
+    df['abc_class'] = df['cumulative_perc'].apply(classify)
+    return df
+
+# --- ALGORITHM: SAFETY STOCK & EOQ ---
+def calculate_inventory_metrics(df_sales, df_products):
+    metrics = []
+    
+    for _, prod in df_products.iterrows():
+        annual_demand = prod['sales_count'] * 12 if prod['sales_count'] > 0 else 10 
+        holding_cost = prod['cost_price'] * 0.20 
+        order_cost = 500 
+        
+        eoq = 0
+        if holding_cost > 0:
+            eoq = math.sqrt((2 * annual_demand * order_cost) / holding_cost)
+            
+        metrics.append({
+            "name": prod['name'],
+            "annual_demand_est": annual_demand,
+            "eoq": math.ceil(eoq),
+            "reorder_point": math.ceil(annual_demand/365 * 7) + 5 
+        })
+    return pd.DataFrame(metrics)
+
+# --- ALGORITHM: FORECASTING ---
+def forecast_next_period(sales_array, window=5):
+    if len(sales_array) < window:
+        return np.mean(sales_array) if len(sales_array) > 0 else 0
+        
+    recent = sales_array[-window:]
+    weights = np.arange(1, len(recent) + 1)
+    return np.dot(recent, weights) / weights.sum()
+
+# --- ALGORITHM: TIME-SERIES TREND ---
+def analyze_trend_slope(sales_series):
+    if len(sales_series) < 2: return "Stable"
+    x = np.arange(len(sales_series))
+    y = np.array(sales_series)
+    slope, _ = np.polyfit(x, y, 1)
+    
+    if slope > 0.5: return "↗️ Increasing"
+    elif slope < -0.5: return "↘️ Decreasing"
+    else: return "➡️ Stable"
+
+# --- ALGORITHM: FRAUD DETECTION ---
+def detect_fraud(cart_items, total, time_sec):
+    flags = []
+    qty_map = {}
+    for i in cart_items: qty_map[i['name']] = qty_map.get(i['name'], 0) + 1
+    
+    if any(q > 10 for q in qty_map.values()):
+        flags.append("Bulk Purchase Anomaly (>10 units)")
+        
+    if len(cart_items) > 3 and time_sec < 5:
+        flags.append("Superhuman Speed (<5s)")
+        
+    if total > 100000:
+        flags.append("High Value Transaction (>1L)")
+        
+    return flags
+
+# --- ALGORITHM: SALES RANKING ---
+def rank_products(df_sales, df_products):
+    if df_sales.empty: return pd.DataFrame()
+    
+    import json
+    all_items = []
+    for _, row in df_sales.iterrows():
+        try:
+            ids = json.loads(row['items_json'])
+            all_items.extend(ids)
+        except: continue
+        
+    from collections import Counter
+    counts = Counter(all_items)
+    
+    ranking_data = []
+    for _, prod in df_products.iterrows():
+        qty = counts.get(prod['id'], 0)
+        rev = qty * prod['price']
+        ranking_data.append({
+            "name": prod['name'],
+            "qty_sold": qty,
+            "revenue": rev,
+            "score": (qty * 10) + (rev * 0.01) 
+        })
+        
+    ranking_data.sort(key=lambda x: x['score'], reverse=True)
+    
+    for i, item in enumerate(ranking_data):
+        if i == 0: item['rank'] = "🥇 Top Seller"
+        elif i < len(ranking_data)/2: item['rank'] = "🥈 Average Performer"
+        else: item['rank'] = "🥉 Low Performer"
+        
+    return pd.DataFrame(ranking_data)
+
+# --- BACKUP & RESTORE ---
+def backup_system():
+    if not os.path.exists("backups"): os.makedirs("backups")
+    fname = f"backups/inventory_backup_{int(time.time())}.db"
+    try:
+        shutil.copy("inventory_system.db", fname)
+        return fname
+    except Exception as e:
+        return None
+
+# --- RECEIPT GENERATION ---
+class PDFReceipt(FPDF):
+    def __init__(self, store_name, logo_path=None):
+        super().__init__()
+        self.store_name = store_name
+        self.logo_path = logo_path
+
+    def header(self):
+        if self.logo_path and os.path.exists(self.logo_path):
+            try:
+                self.image(self.logo_path, 10, 8, 25)
+                self.set_xy(40, 10)
+            except: pass
+        
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, self.store_name, 0, 1, 'C')
+        self.set_font('Arial', '', 9)
+        self.cell(0, 5, 'Retail & POS System', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None):
+    logo_path = "logo.png" if os.path.exists("logo.png") else None
+    
+    pdf = PDFReceipt(store_name, logo_path)
+    pdf.add_page()
+    
+    pdf.set_font("Arial", size=10)
+    
+    pdf.cell(100, 6, f"Receipt No: #{txn_id}", 0, 0)
+    pdf.cell(0, 6, f"Date: {time_str}", 0, 1, 'R')
+    pdf.cell(100, 6, f"Cashier: {operator}", 0, 0)
+    pdf.cell(0, 6, f"POS: {pos}", 0, 1, 'R')
+    
+    if customer:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(0, 6, "Customer Details:", 0, 1, 'L')
+        pdf.set_font("Arial", '', 10)
+        pdf.cell(0, 5, f"Name: {customer.get('name', 'N/A')}", 0, 1)
+        pdf.cell(0, 5, f"Mobile: {customer.get('mobile', 'N/A')}", 0, 1)
+        # Loyalty details on receipt
+        if customer.get('loyalty_points'):
+            pdf.cell(0, 5, f"Loyalty Balance: {customer.get('loyalty_points')} Pts", 0, 1)
+
+    pdf.ln(5)
+    
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(100, 8, "Item", 1, 0, 'L', True)
+    pdf.cell(30, 8, "Price", 1, 0, 'C', True)
+    pdf.cell(20, 8, "Qty", 1, 0, 'C', True)
+    pdf.cell(40, 8, "Total", 1, 1, 'R', True)
+    
+    pdf.set_font("Arial", '', 10)
+    item_summary = {}
+    for i in items:
+        if i['name'] in item_summary:
+            item_summary[i['name']]['qty'] += 1
+            item_summary[i['name']]['total'] += i['price']
+        else:
+            item_summary[i['name']] = {'price': i['price'], 'qty': 1, 'total': i['price']}
+            
+    for name, data in item_summary.items():
+        sanitized_name = name.encode('latin-1', 'replace').decode('latin-1')
+        pdf.cell(100, 7, sanitized_name, 1)
+        pdf.cell(30, 7, f"{data['price']:.2f}", 1, 0, 'C')
+        pdf.cell(20, 7, str(data['qty']), 1, 0, 'C')
+        pdf.cell(40, 7, f"{data['total']:.2f}", 1, 1, 'R')
+        
+    pdf.ln(5)
+    pdf.set_font("Arial", '', 10)
+    
+    # Tax and Discount Section
+    subtotal = total
+    if tax_info:
+        # Reconstruct if logic was tax included/excluded
+        # Just display raw
+        pass
+
+    if tax_info and tax_info.get('tax_amount', 0) > 0:
+        pdf.cell(150, 6, f"GST ({tax_info['tax_percent']}%)", 0, 0, 'R')
+        pdf.cell(40, 6, f"{tax_info['tax_amount']:.2f}", 1, 1, 'R')
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(150, 8, "NET TOTAL", 0, 0, 'R')
+    pdf.cell(40, 8, f"Rs {total:.2f}", 1, 1, 'R')
+    
+    pdf.set_font("Arial", '', 9)
+    pdf.ln(10)
+    pdf.cell(0, 5, f"Payment Mode: {mode}", 0, 1, 'L')
+    pdf.cell(0, 5, "Terms: Non-refundable. Goods once sold cannot be returned.", 0, 1, 'C')
+    
+    return pdf.output(dest='S').encode('latin-1')
+
+def generate_upi_qr(vpa, name, amount, note):
+    params = {"pa": vpa, "pn": name, "am": f"{amount:.2f}", "cu": "INR", "tn": note}
+    url = f"upi://pay?{urllib.parse.urlencode(params)}"
+    qr = qrcode.QRCode(box_size=10, border=4)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf)
+    return buf.getvalue()
