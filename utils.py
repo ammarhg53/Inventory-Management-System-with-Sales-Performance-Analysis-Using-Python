@@ -8,9 +8,10 @@ import qrcode
 from io import BytesIO
 from fpdf import FPDF
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 import shutil
 import os
+import json
 
 # --- FEATURE 5: LOYALTY LOGIC ---
 def calculate_loyalty_points(amount):
@@ -275,6 +276,152 @@ def rank_products(df_sales, df_products):
         else: item['rank'] = "🥉 Low Performer"
         
     return pd.DataFrame(ranking_data)
+
+# --- NEW: PROFIT & LOSS ANALYSIS ---
+def calculate_profit_loss(df_sales, df_products):
+    """
+    Calculates profit or loss per category and item based on sales and current cost price.
+    Returns summary dict and dataframe.
+    """
+    if df_sales.empty or df_products.empty:
+        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0}, pd.DataFrame()
+
+    # Map Product Details
+    prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
+    
+    category_pl = {}
+    item_pl = {}
+    total_rev = 0
+    total_cost = 0
+
+    for _, row in df_sales.iterrows():
+        try:
+            items = json.loads(row['items_json'])
+            # Logic: We assume the sales record used current price (approximation for ERP analytics)
+            # A strict accounting system would store CP at time of sale.
+            
+            for pid in items:
+                if pid in prod_map:
+                    p = prod_map[pid]
+                    cp = p['cost_price']
+                    sp = p['price']
+                    
+                    profit = sp - cp
+                    
+                    total_rev += sp
+                    total_cost += cp
+                    
+                    # Category Aggregation
+                    cat = p['category']
+                    if cat not in category_pl:
+                        category_pl[cat] = {'revenue': 0, 'cost': 0, 'profit': 0}
+                    category_pl[cat]['revenue'] += sp
+                    category_pl[cat]['cost'] += cp
+                    category_pl[cat]['profit'] += profit
+                    
+        except: continue
+
+    net_profit = total_rev - total_cost
+    
+    # Format DF for charts
+    pl_data = []
+    for cat, metrics in category_pl.items():
+        pl_data.append({
+            "Category": cat,
+            "Revenue": metrics['revenue'],
+            "Cost": metrics['cost'],
+            "Profit": metrics['profit'],
+            "Margin %": (metrics['profit'] / metrics['revenue'] * 100) if metrics['revenue'] > 0 else 0
+        })
+    
+    return {
+        "net_profit": net_profit, 
+        "total_revenue": total_rev, 
+        "total_cost": total_cost,
+        "margin_percent": (net_profit / total_rev * 100) if total_rev > 0 else 0
+    }, pd.DataFrame(pl_data)
+
+# --- NEW: DEAD STOCK & EXPIRY RISK ---
+def analyze_risk_inventory(df_products):
+    """
+    Analyzes Dead Stock (flagged) and Expiry Status.
+    """
+    if df_products.empty: return {}, pd.DataFrame()
+    
+    today = datetime.now()
+    risk_data = []
+    
+    dead_stock_val = 0
+    expired_stock_val = 0
+    near_expiry_val = 0
+    
+    for _, row in df_products.iterrows():
+        status = "Safe"
+        
+        # Dead Stock Check
+        is_dead = str(row.get('is_dead_stock', 'False')) == 'True'
+        
+        # Expiry Check
+        exp_date_str = row.get('expiry_date')
+        
+        if exp_date_str and exp_date_str != "NA":
+            try:
+                exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d")
+                days_left = (exp_date - today).days
+                
+                if days_left < 0:
+                    status = "Expired"
+                    expired_stock_val += (row['stock'] * row['cost_price'])
+                elif days_left < 30:
+                    status = "Near Expiry"
+                    near_expiry_val += (row['stock'] * row['cost_price'])
+            except: pass
+        elif exp_date_str == "NA":
+             status = "Non-Expirable"
+            
+        if is_dead:
+            dead_stock_val += (row['stock'] * row['cost_price'])
+            
+        risk_data.append({
+            "Name": row['name'],
+            "Stock": row['stock'],
+            "Value": row['stock'] * row['cost_price'],
+            "Status": status,
+            "Is Dead Stock": "Yes" if is_dead else "No",
+            "Expiry": exp_date_str
+        })
+        
+    return {
+        "dead_stock_value": dead_stock_val,
+        "expired_loss": expired_stock_val,
+        "near_expiry_risk": near_expiry_val
+    }, pd.DataFrame(risk_data)
+
+# --- NEW: FINANCIAL RATIOS ---
+def calculate_financial_ratios(df_sales, df_products):
+    # Inventory Turnover = COGS / Avg Inventory Value
+    # Avg Inventory ~ Current Inventory (Simplification)
+    
+    current_inv_val = (df_products['stock'] * df_products['cost_price']).sum()
+    
+    # Calculate COGS from Sales
+    cogs = 0
+    prod_cp_map = df_products.set_index('id')['cost_price'].to_dict()
+    
+    for _, row in df_sales.iterrows():
+        try:
+            items = json.loads(row['items_json'])
+            for pid in items:
+                cogs += prod_cp_map.get(pid, 0)
+        except: continue
+        
+    turnover_ratio = (cogs / current_inv_val) if current_inv_val > 0 else 0
+    
+    return {
+        "inventory_turnover_ratio": round(turnover_ratio, 2),
+        "inventory_valuation": current_inv_val,
+        "cogs": cogs
+    }
 
 # --- BACKUP & RESTORE ---
 def backup_system():
