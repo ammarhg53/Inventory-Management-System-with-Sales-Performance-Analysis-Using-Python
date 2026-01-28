@@ -5,7 +5,7 @@ import time
 import random
 import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 # Internal modules
@@ -71,9 +71,44 @@ if 'product_trie' not in st.session_state:
 
 # --- AUTHENTICATION MODULE ---
 def login_view():
-    # UI/UX ADDITION: Centered Container Layout
+    # UI/UX ADDITION: Centered Container Layout with Side Panel
     c_left, c_center, c_right = st.columns([1, 2, 1])
     
+    # --- ISSUE 2 FIX: TERMINAL STATUS PANEL ---
+    with c_left:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("### 🖥️ POS Status")
+        st.caption("Live Terminal Availability")
+        
+        terminals = db.get_all_terminals()
+        
+        for index, row in terminals.iterrows():
+            # Color Coding for Status
+            if row['status'] == 'Active':
+                status_color = "#10b981" # Green
+                status_icon = "🟢"
+                status_text = "Online"
+            elif row['status'] == 'Maintenance':
+                status_color = "#f59e0b" # Yellow
+                status_icon = "🟡"
+                status_text = "Maintenance"
+            else:
+                status_color = "#ef4444" # Red
+                status_icon = "🔴"
+                status_text = "Disabled"
+            
+            st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.05); border-radius: 8px; padding: 12px; margin-bottom: 10px; border-left: 4px solid {status_color};">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight: 600; font-size: 0.95rem;">{row['name']}</span>
+                    <span style="font-size: 0.8rem; opacity:0.7;">{row['id']}</span>
+                </div>
+                <div style="font-size: 0.85rem; margin-top: 5px; color: {status_color}; font-weight:500;">
+                    {status_icon} {status_text}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
     with c_center:
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.markdown(f"""
@@ -87,8 +122,8 @@ def login_view():
         st.markdown("<div class='login-box' style='margin: 0 auto;'>", unsafe_allow_html=True)
         st.subheader("🔐 Secure Access")
         
-        # Get terminals for dropdown
-        terminals = db.get_all_terminals()
+        # Get terminals for dropdown (Allow selecting any to validate, or filter. 
+        # Filtering provides better UX, but validation ensures security.)
         active_ids = [t['id'] for _, t in terminals.iterrows() if t['status'] == 'Active']
         if "Office Dashboard" not in active_ids: active_ids.append("Office Dashboard")
         
@@ -113,13 +148,12 @@ def login_view():
                         st.error(f"❌ Account is {u_status}. Contact Admin.")
                         return
                 except AttributeError:
-                    # Fail safe if db not updated
                     pass
 
-                # Check Terminal Status
+                # --- ISSUE 3 FIX: TERMINAL ACCESS VALIDATION ---
                 t_status = db.check_terminal_status(term_in)
                 if term_in != "Office Dashboard" and t_status != "Active":
-                    st.error(f"⛔ Terminal {term_in} is {t_status}. Login blocked.")
+                    st.error(f"⛔ Terminal {term_in} is currently {t_status}. Access Blocked.")
                     return
 
                 # 2. Concurrency Check
@@ -160,6 +194,7 @@ def login_view():
             st.code("""
 User: ammar_admin | Pass: admin123   (Admin)
 User: manager_1   | Pass: manager123 (Manager)
+User: inv_man     | Pass: inv123     (Inventory Manager)
 User: pos_op_1    | Pass: pos123     (Operator)
             """, language="text")
 
@@ -605,16 +640,31 @@ def inventory_manager():
         df_filtered = df
         if cat_filter != "All": df_filtered = df[df['category'] == cat_filter]
         if search_txt: df_filtered = df_filtered[df_filtered['name'].str.contains(search_txt, case=False)]
-        st.dataframe(df_filtered[['id', 'name', 'category', 'price', 'stock']], use_container_width=True)
-        st.markdown("##### Generate QR Code for Product")
-        sel_prod_id = st.number_input("Enter Product ID to Generate QR", min_value=1, step=1)
-        if st.button("Generate QR"):
-            p_data = db.get_product_by_id(sel_prod_id)
-            if p_data:
-                qr_bytes = utils.generate_product_qr_image(p_data['id'], p_data['name'])
-                st.image(qr_bytes, caption=f"QR for {p_data['name']}")
-            else:
-                st.error("Product ID not found")
+        
+        # Dead Stock Flag in View
+        st.dataframe(df_filtered[['id', 'name', 'category', 'price', 'stock', 'expiry_date', 'is_dead_stock']], use_container_width=True)
+        
+        col_dead_1, col_dead_2 = st.columns(2)
+        with col_dead_1:
+            st.markdown("##### 💀 Manage Dead Stock")
+            ds_id = st.number_input("Product ID", min_value=1, step=1, key="ds_pid")
+            ds_action = st.radio("Set Status", ["Active", "Dead Stock"], horizontal=True)
+            if st.button("Update Status"):
+                db.toggle_dead_stock(ds_id, ds_action == "Dead Stock")
+                st.success("Status Updated")
+                time.sleep(1)
+                st.rerun()
+        
+        with col_dead_2:
+            st.markdown("##### Generate QR Code for Product")
+            sel_prod_id = st.number_input("Enter Product ID to Generate QR", min_value=1, step=1)
+            if st.button("Generate QR"):
+                p_data = db.get_product_by_id(sel_prod_id)
+                if p_data:
+                    qr_bytes = utils.generate_product_qr_image(p_data['id'], p_data['name'])
+                    st.image(qr_bytes, caption=f"QR for {p_data['name']}")
+                else:
+                    st.error("Product ID not found")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_add:
@@ -625,8 +675,17 @@ def inventory_manager():
             p = st.number_input("Selling Price", min_value=0.0)
             cp = st.number_input("Cost Price", min_value=0.0)
             s = st.number_input("Initial Stock", min_value=0)
+            
+            # New Expiry Logic
+            has_expiry = st.radio("Does this product have an expiry date?", ["Yes", "No"], index=0, horizontal=True)
+            exp = None
+            if has_expiry == "Yes":
+                exp = st.date_input("Expiry Date")
+            else:
+                exp = "NA"
+            
             if st.form_submit_button("Add Product"):
-                if db.add_product(n, c, p, s, cp):
+                if db.add_product(n, c, p, s, cp, exp):
                     st.success(f"Added {n}")
                     st.rerun()
                 else: st.error("Error adding product")
@@ -691,6 +750,10 @@ def inventory_manager():
 def analytics_dashboard():
     st.title("📈 Enterprise Analytics")
     df_sales = db.get_sales_data()
+    conn = db.get_connection()
+    df_prods = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
     try:
         df_sales['date'] = pd.to_datetime(df_sales['timestamp'], format='mixed', dayfirst=False, errors='coerce')
         df_sales = df_sales.dropna(subset=['date'])
@@ -706,16 +769,79 @@ def analytics_dashboard():
     with m2: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Transactions</div><div class='kpi-value'>{total_txns}</div></div>", unsafe_allow_html=True)
     with m3: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Avg Order Value</div><div class='kpi-value'>{currency}{total_rev/total_txns:.0f}</div></div>", unsafe_allow_html=True)
 
-    # PRESERVING ALL 6 ANALYTICS TABS
-    t1, t2, t3, t4, t5, t6 = st.tabs(["Sales Trends", "Staff Performance", "Demand Forecast", "Algorithm Showcase", "🏆 Rankings", "📊 Category Analysis"])
+    # UPDATED ANALYTICS TABS (8 TABS NOW)
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
+        "💰 Financials & P&L", "⚠️ Risk & Loss Prevention", "Sales Trends", "Staff Performance", 
+        "Demand Forecast", "Algorithm Showcase", "🏆 Rankings", "📊 Category Analysis"
+    ])
+    
+    # --- NEW: PROFIT & LOSS TAB ---
     with t1:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("💰 Profit & Loss Statement")
+        pl_summary, pl_df = utils.calculate_profit_loss(df_sales, df_prods)
+        
+        # Financial Ratios
+        ratios = utils.calculate_financial_ratios(df_sales, df_prods)
+        
+        c_pl1, c_pl2, c_pl3, c_pl4 = st.columns(4)
+        c_pl1.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}", delta=f"{pl_summary['margin_percent']:.1f}% Margin")
+        c_pl2.metric("Total COGS", f"{currency}{pl_summary['total_cost']:,.2f}", help="Cost of Goods Sold")
+        c_pl3.metric("Inventory Turnover", f"{ratios['inventory_turnover_ratio']}x", help="Higher is better")
+        c_pl4.metric("Inventory Valuation", f"{currency}{ratios['inventory_valuation']:,.0f}")
+        
+        st.markdown("#### Category-wise Profitability")
+        if not pl_df.empty:
+            st.bar_chart(pl_df.set_index('Category')['Profit'])
+            st.dataframe(pl_df.style.format({"Revenue": "{:,.2f}", "Cost": "{:,.2f}", "Profit": "{:,.2f}", "Margin %": "{:.1f}%"}), use_container_width=True)
+        else:
+            st.info("No data available")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- NEW: RISK & LOSS PREVENTION TAB ---
+    with t2:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("⚠️ Inventory Risk Assessment")
+        risk_summary, risk_df = utils.analyze_risk_inventory(df_prods)
+        
+        c_r1, c_r2, c_r3 = st.columns(3)
+        c_r1.metric("Dead Stock Value", f"{currency}{risk_summary['dead_stock_value']:,.2f}", delta_color="inverse")
+        c_r2.metric("Expired Stock Loss", f"{currency}{risk_summary['expired_loss']:,.2f}", delta_color="inverse")
+        c_r3.metric("Near Expiry Risk", f"{currency}{risk_summary['near_expiry_risk']:,.2f}", help="Capital at risk of expiration")
+        
+        st.markdown("---")
+        
+        col_risk_viz, col_risk_act = st.columns([2, 1])
+        with col_risk_viz:
+            st.markdown("#### Stock Health Breakdown")
+            if not risk_df.empty:
+                risk_counts = risk_df['Status'].value_counts()
+                st.bar_chart(risk_counts)
+                st.dataframe(risk_df[risk_df['Status'] != 'Safe'], use_container_width=True)
+        
+        with col_risk_act:
+            st.info("📉 Loss Minimization Strategy")
+            st.markdown("""
+            **For Near-Expiry Products:**
+            1. Apply **30-50% Discount** immediately.
+            2. Bundle with High-Selling items.
+            3. Aim to recover **Cost Price** (Zero Profit > Total Loss).
+            
+            **For Dead Stock:**
+            1. Return to vendor if possible.
+            2. Liquidation Sale (Buy 1 Get 1).
+            """)
+            
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with t3:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         daily = df_sales.groupby(df_sales['date'].dt.date)['total_amount'].sum().reset_index()
         trend_dir = utils.analyze_trend_slope(daily['total_amount'].values)
         st.info(f"Market Trend (Algo #32): {trend_dir}")
         st.line_chart(daily.set_index('date')['total_amount'])
         st.markdown("</div>", unsafe_allow_html=True)
-    with t2:
+    with t4:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         staff_stats = df_sales.groupby('operator').agg({'total_amount':'sum', 'id':'count', 'time_taken': 'mean'}).reset_index()
         staff_stats.columns = ['Name', 'Revenue', 'Sales Count', 'Avg Time (s)']
@@ -723,7 +849,7 @@ def analytics_dashboard():
         staff_stats = staff_stats.sort_values('Performance Score', ascending=False)
         st.dataframe(staff_stats, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
-    with t3:
+    with t5:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         if not df_sales.empty:
             daily = df_sales.groupby(df_sales['date'].dt.date)['total_amount'].sum().reset_index()
@@ -741,7 +867,7 @@ def analytics_dashboard():
                 st.bar_chart(chart_data)
         else: st.info("Insufficient data for forecasting.")
         st.markdown("</div>", unsafe_allow_html=True)
-    with t4:
+    with t6:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         col_algo1, col_algo2 = st.columns(2)
         with col_algo1:
@@ -771,7 +897,7 @@ def analytics_dashboard():
             if not rank_df.empty: st.dataframe(rank_df[['rank', 'name', 'qty_sold', 'score']], hide_index=True)
             else: st.info("No sales data for ranking.")
         st.markdown("</div>", unsafe_allow_html=True)
-    with t5:
+    with t7:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("🥇 Top Performers (Rankings)")
         c1, c2 = st.columns(2)
@@ -784,7 +910,7 @@ def analytics_dashboard():
             fast_op = df_sales.groupby('operator')['time_taken'].mean().reset_index().sort_values('time_taken')
             st.dataframe(fast_op, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
-    with t6:
+    with t8:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("📊 Category Performance Analysis")
         cat_perf = db.get_category_performance()
@@ -830,27 +956,31 @@ def admin_panel():
             else: st.error("Failed")
         st.markdown("</div>", unsafe_allow_html=True)
 
+    # --- ISSUE 1 FIX: ROLE-BASED ACCESS CONTROL (MANAGER) ---
     with tab_settings:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        with st.form("settings_form"):
-            s_name = st.text_input("Store Name", value=db.get_setting("store_name"))
-            s_upi = st.text_input("UPI ID (for QR)", value=db.get_setting("upi_id"))
-            col_s1, col_s2 = st.columns(2)
-            with col_s1: s_tax = st.number_input("GST Percentage (%)", value=float(db.get_setting("tax_rate")))
-            with col_s2: s_gst_enable = st.checkbox("Enable GST Billing", value=(db.get_setting("gst_enabled") == 'True'))
-            s_mode = st.selectbox("Default Bill Mode", ["GST Bill", "Non-GST Bill"], index=0 if db.get_setting("default_bill_mode") == "GST Bill" else 1)
-            uploaded_logo = st.file_uploader("Store Logo (PNG/JPG)", type=['png', 'jpg', 'jpeg'])
-            if st.form_submit_button("Save Settings"):
-                db.set_setting("store_name", s_name)
-                db.set_setting("upi_id", s_upi)
-                db.set_setting("tax_rate", str(s_tax))
-                db.set_setting("gst_enabled", str(s_gst_enable))
-                db.set_setting("default_bill_mode", s_mode)
-                if uploaded_logo:
-                    with open("logo.png", "wb") as f: f.write(uploaded_logo.getbuffer())
-                st.success("Settings Saved!")
-                time.sleep(1)
-                st.rerun()
+        if st.session_state['role'] != 'Admin':
+            st.error("⛔ Access Denied. Administrator privileges required.")
+        else:
+            with st.form("settings_form"):
+                s_name = st.text_input("Store Name", value=db.get_setting("store_name"))
+                s_upi = st.text_input("UPI ID (for QR)", value=db.get_setting("upi_id"))
+                col_s1, col_s2 = st.columns(2)
+                with col_s1: s_tax = st.number_input("GST Percentage (%)", value=float(db.get_setting("tax_rate")))
+                with col_s2: s_gst_enable = st.checkbox("Enable GST Billing", value=(db.get_setting("gst_enabled") == 'True'))
+                s_mode = st.selectbox("Default Bill Mode", ["GST Bill", "Non-GST Bill"], index=0 if db.get_setting("default_bill_mode") == "GST Bill" else 1)
+                uploaded_logo = st.file_uploader("Store Logo (PNG/JPG)", type=['png', 'jpg', 'jpeg'])
+                if st.form_submit_button("Save Settings"):
+                    db.set_setting("store_name", s_name)
+                    db.set_setting("upi_id", s_upi)
+                    db.set_setting("tax_rate", str(s_tax))
+                    db.set_setting("gst_enabled", str(s_gst_enable))
+                    db.set_setting("default_bill_mode", s_mode)
+                    if uploaded_logo:
+                        with open("logo.png", "wb") as f: f.write(uploaded_logo.getbuffer())
+                    st.success("Settings Saved!")
+                    time.sleep(1)
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_cust:
@@ -863,56 +993,64 @@ def admin_panel():
             c2.metric("Total Customer Spend", f"{currency}{cust_df['total_spend'].sum():,.2f}")
         st.markdown("</div>", unsafe_allow_html=True)
 
+    # --- ISSUE 1 FIX: ROLE-BASED ACCESS CONTROL (MANAGER) ---
     with tab_term:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        with st.expander("Add New Terminal"):
-            with st.form("add_term"):
-                nt_id = st.text_input("Terminal ID (e.g., POS-3)")
-                nt_name = st.text_input("Name (e.g., Upstairs)")
-                nt_loc = st.text_input("Location")
-                if st.form_submit_button("Create Terminal"):
-                    if db.add_terminal(nt_id, nt_name, nt_loc): st.success("Terminal Added"); st.rerun()
-                    else: st.error("Error creating terminal")
-        terms = db.get_all_terminals()
-        for _, t in terms.iterrows():
-            with st.container():
-                c1, c2, c3 = st.columns([3, 1, 1])
-                c1.write(f"**{t['name']}** ({t['id']}) - {t['location']}")
-                new_status = c2.selectbox("Status", ["Active", "Maintenance", "Error"], index=["Active", "Maintenance", "Error"].index(t['status']), key=f"status_{t['id']}")
-                if new_status != t['status']:
-                    db.update_terminal_status(t['id'], new_status)
-                    st.toast("Status Updated")
-                    time.sleep(0.5)
-                    st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_users:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        with st.expander("Create New User"):
-            with st.form("new_user_form"):
-                nu_user = st.text_input("Username")
-                nu_pass = st.text_input("Password", type="password")
-                nu_name = st.text_input("Full Name")
-                nu_role = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
-                if st.form_submit_button("Create User"):
-                    if db.create_user(nu_user, nu_pass, nu_role, nu_name): st.success("User Created"); st.rerun()
-                    else: st.error("Error")
-        
-        st.subheader("Manage User Status (Feature #1)")
-        users = db.get_all_users()
-        for _, u in users.iterrows():
-            with st.container():
-                c1, c2 = st.columns([4, 1])
-                c1.write(f"**{u['username']}** ({u['role']}) - {u['status']}")
-                
-                # Prevent disabling self
-                if u['username'] != st.session_state['user']:
-                    new_stat = c2.selectbox("Status", ["Active", "Disabled"], index=0 if u['status'] == 'Active' else 1, key=f"u_stat_{u['username']}")
-                    if new_stat != u['status']:
-                        db.update_user_status(u['username'], new_stat)
-                        st.toast(f"User {u['username']} updated to {new_stat}")
+        if st.session_state['role'] != 'Admin':
+            st.error("⛔ Access Denied. Administrator privileges required.")
+        else:
+            with st.expander("Add New Terminal"):
+                with st.form("add_term"):
+                    nt_id = st.text_input("Terminal ID (e.g., POS-3)")
+                    nt_name = st.text_input("Name (e.g., Upstairs)")
+                    nt_loc = st.text_input("Location")
+                    if st.form_submit_button("Create Terminal"):
+                        if db.add_terminal(nt_id, nt_name, nt_loc): st.success("Terminal Added"); st.rerun()
+                        else: st.error("Error creating terminal")
+            terms = db.get_all_terminals()
+            for _, t in terms.iterrows():
+                with st.container():
+                    c1, c2, c3 = st.columns([3, 1, 1])
+                    c1.write(f"**{t['name']}** ({t['id']}) - {t['location']}")
+                    new_status = c2.selectbox("Status", ["Active", "Maintenance", "Error"], index=["Active", "Maintenance", "Error"].index(t['status']), key=f"status_{t['id']}")
+                    if new_status != t['status']:
+                        db.update_terminal_status(t['id'], new_status)
+                        st.toast("Status Updated")
                         time.sleep(0.5)
                         st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- ISSUE 1 FIX: ROLE-BASED ACCESS CONTROL (MANAGER) ---
+    with tab_users:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        if st.session_state['role'] != 'Admin':
+             st.error("⛔ Access Denied. Administrator privileges required.")
+        else:
+            with st.expander("Create New User"):
+                with st.form("new_user_form"):
+                    nu_user = st.text_input("Username")
+                    nu_pass = st.text_input("Password", type="password")
+                    nu_name = st.text_input("Full Name")
+                    nu_role = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
+                    if st.form_submit_button("Create User"):
+                        if db.create_user(nu_user, nu_pass, nu_role, nu_name): st.success("User Created"); st.rerun()
+                        else: st.error("Error")
+            
+            st.subheader("Manage User Status (Feature #1)")
+            users = db.get_all_users()
+            for _, u in users.iterrows():
+                with st.container():
+                    c1, c2 = st.columns([4, 1])
+                    c1.write(f"**{u['username']}** ({u['role']}) - {u['status']}")
+                    
+                    # Prevent disabling self
+                    if u['username'] != st.session_state['user']:
+                        new_stat = c2.selectbox("Status", ["Active", "Disabled"], index=0 if u['status'] == 'Active' else 1, key=f"u_stat_{u['username']}")
+                        if new_stat != u['status']:
+                            db.update_user_status(u['username'], new_stat)
+                            st.toast(f"User {u['username']} updated to {new_stat}")
+                            time.sleep(0.5)
+                            st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_req_app:
