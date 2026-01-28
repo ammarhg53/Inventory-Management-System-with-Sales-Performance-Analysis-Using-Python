@@ -27,7 +27,9 @@ def init_db():
                   stock INTEGER, 
                   cost_price REAL, 
                   sales_count INTEGER DEFAULT 0,
-                  last_restock_date TEXT)''')
+                  last_restock_date TEXT,
+                  expiry_date TEXT,
+                  is_dead_stock TEXT DEFAULT 'False')''')
     
     # Updated Sales table for Coupons/Points
     c.execute('''CREATE TABLE IF NOT EXISTS sales
@@ -147,6 +149,11 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE customers ADD COLUMN segment TEXT DEFAULT 'New'")
     except: pass
+    # Analytics Migrations
+    try: c.execute("ALTER TABLE products ADD COLUMN expiry_date TEXT")
+    except: pass
+    try: c.execute("ALTER TABLE products ADD COLUMN is_dead_stock TEXT DEFAULT 'False'")
+    except: pass
 
     # --- CLEANUP ON RESTART ---
     c.execute("DELETE FROM active_sessions")
@@ -176,8 +183,8 @@ def init_db():
     ]
     for u, p, r, n in users:
         ph = hashlib.sha256(p.encode()).hexdigest()
-        # Note: status defaults to 'Active' via schema if not present, but for upsert we need to be careful not to overwrite status if exists
-        c.execute("INSERT OR IGNORE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
+        # FIX: Changed INSERT OR IGNORE to INSERT OR REPLACE to ensure password updates and fixes are applied
+        c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
     c.execute("SELECT count(*) FROM products")
     if c.fetchone()[0] == 0:
@@ -259,7 +266,7 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                      tax_amount, discount_amount, coupon_applied, points_redeemed) 
                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (timestamp, total, items_json, integrity_hash, operator, mode, time_taken, 
-                 pos_id, customer_mobile, tax_amount, discount_amount, coupon_code, points_redeemed))
+                 pos_id, customer_mobile, tax_amount, discount_amount, coupon_applied, points_redeemed))
         sale_id = c.lastrowid
 
         # 4. Update Customer Stats
@@ -403,7 +410,6 @@ def get_coupon(code):
     c_data = c.fetchone()
     conn.close()
     if c_data:
-        # Check validity
         # Schema: code, type, value, min_bill, valid_until, limit, used
         expiry = c_data[4]
         limit = c_data[5]
@@ -431,7 +437,7 @@ def create_campaign(name, c_type, start, end, config):
     conn = get_connection()
     c = conn.cursor()
     c.execute("INSERT INTO campaigns (name, type, start_time, end_time, config_json) VALUES (?, ?, ?, ?, ?)",
-              (name, c_type, start, end, json.dumps(config)))
+              (name, c_type, start, end, config_json := json.dumps(config)))
     conn.commit()
     conn.close()
 
@@ -546,12 +552,22 @@ def update_request_status(req_id, status):
 
 # --- PRODUCT MANAGEMENT (CRUD) ---
 
-def add_product(name, category, price, stock, cost_price):
+def add_product(name, category, price, stock, cost_price, expiry_date=None):
     conn = get_connection()
     c = conn.cursor()
+    
+    # Logic update for NA support
+    if expiry_date == "NA":
+        expiry_str = "NA"
+    elif expiry_date:
+        expiry_str = expiry_date.strftime("%Y-%m-%d")
+    else:
+        # Default behavior if nothing specified: 1 year expiry (Backward compatibility)
+        expiry_str = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+
     try:
-        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date) VALUES (?, ?, ?, ?, ?, 0, ?)",
-                  (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d")))
+        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, is_dead_stock) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'False')",
+                  (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d"), expiry_str))
         conn.commit()
         return True
     except Exception as e:
@@ -574,6 +590,15 @@ def delete_product(p_id):
     conn.commit()
     conn.close()
 
+def toggle_dead_stock(p_id, is_dead):
+    """Marks a product as Dead Stock."""
+    conn = get_connection()
+    c = conn.cursor()
+    val = 'True' if is_dead else 'False'
+    c.execute("UPDATE products SET is_dead_stock=? WHERE id=?", (val, p_id))
+    conn.commit()
+    conn.close()
+
 def get_all_products():
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM products", conn)
@@ -587,6 +612,8 @@ def get_product_by_id(p_id):
     row = c.fetchone()
     conn.close()
     if row:
+        # Adjusted schema index for new columns
+        # id, name, category, price, stock, cost_price, sales_count, last_restock_date, expiry, dead_stock
         return {"id": row[0], "name": row[1], "category": row[2], "price": row[3], "stock": row[4]}
     return None
 
@@ -701,8 +728,11 @@ def seed_advanced_demo_data():
         for cat, items in demo_products.items():
             for name, price, cost in items:
                 stock = random.randint(20, 100)
-                c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date) VALUES (?, ?, ?, ?, ?, ?)",
-                          (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d")))
+                # Random expiry 30-365 days
+                exp_days = random.randint(30, 365)
+                expiry = (datetime.now() + timedelta(days=exp_days)).strftime("%Y-%m-%d")
+                c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date, is_dead_stock) VALUES (?, ?, ?, ?, ?, ?, ?, 'False')",
+                          (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
     
     # 3. Users (Multi-Role)
     demo_users = [
@@ -716,7 +746,8 @@ def seed_advanced_demo_data():
     ]
     for u, p, r, n in demo_users:
         ph = hashlib.sha256(p.encode()).hexdigest()
-        c.execute("INSERT OR IGNORE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
+        # FIX: Changed INSERT OR IGNORE to INSERT OR REPLACE to ensure password updates and fixes are applied
+        c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
     # 4. Sales & Transactions (50+ records)
     c.execute("SELECT count(*) FROM sales")
