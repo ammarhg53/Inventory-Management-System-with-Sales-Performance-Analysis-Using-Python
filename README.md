@@ -1,0 +1,2 @@
+# Inventory-Management-System-with-Sales-Performance-Analysis-Using-Python
+This project is a Streamlit-based Inventory Management and Point of Sale (POS) System developed entirely using Python, designed to simulate a real-world retail / ERP-style application.  The system helps manage products, inventory, sales transactions, users, and performance analytics, while also demonstrating the use of data structures,
