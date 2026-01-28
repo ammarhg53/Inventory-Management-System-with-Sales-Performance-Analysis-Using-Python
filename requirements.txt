@@ -2,5 +2,6 @@ streamlit
 pandas
 numpy
 matplotlib
+fpdf
 qrcode
 Pillow
