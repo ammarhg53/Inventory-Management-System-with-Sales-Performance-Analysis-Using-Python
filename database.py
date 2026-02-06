@@ -303,6 +303,84 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
     finally:
         conn.close()
 
+# --- UNDO TRANSACTION LOGIC (Feature #5) ---
+def cancel_sale_transaction(sale_id, operator):
+    """
+    Reverses a transaction:
+    1. Mark sale as 'Cancelled'
+    2. Restore stock quantity for items in that sale
+    3. Log the cancellation
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        # Get sale details
+        c.execute("SELECT items_json, status FROM sales WHERE id=?", (sale_id,))
+        res = c.fetchone()
+        if not res:
+            return False, "Sale ID not found"
+        
+        items_json_str, status = res
+        
+        if status == 'Cancelled':
+            return False, "Sale already cancelled"
+            
+        items_ids = json.loads(items_json_str)
+        
+        # Restore Stock
+        for pid in items_ids:
+            c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
+            
+        # Update Status
+        c.execute("UPDATE sales SET status = 'Cancelled' WHERE id=?", (sale_id,))
+        
+        # Log
+        c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
+                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Undo Sale", f"Cancelled Sale #{sale_id}"))
+        
+        conn.commit()
+        return True, "Success"
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+def redo_sale_transaction(sale_id, operator):
+    """
+    Re-applies a cancelled transaction:
+    1. Mark sale as 'Completed'
+    2. Deduct stock quantity
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT items_json, status FROM sales WHERE id=?", (sale_id,))
+        res = c.fetchone()
+        if not res: return False, "ID not found"
+        
+        items_json_str, status = res
+        if status != 'Cancelled': return False, "Sale is not cancelled"
+        
+        items_ids = json.loads(items_json_str)
+        
+        # Deduct Stock
+        for pid in items_ids:
+            c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (pid,))
+            
+        c.execute("UPDATE sales SET status = 'Completed' WHERE id=?", (sale_id,))
+        
+        c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
+                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Redo Sale", f"Restored Sale #{sale_id}"))
+        
+        conn.commit()
+        return True, "Success"
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
 # --- CUSTOMER MANAGEMENT (Updated) ---
 def get_customer(mobile):
     conn = get_connection()
