@@ -52,6 +52,60 @@ def generate_product_qr_image(product_id, product_name):
     img.save(buf)
     return buf.getvalue()
 
+def generate_qr_labels_pdf(products):
+    """
+    Generates a PDF with printable QR labels for the given products.
+    Each label includes: Name, ID, Category, QR Code.
+    Layout: Grid 3x4 (12 labels per page)
+    """
+    pdf = FPDF(orientation='P', unit='mm', format='A4')
+    pdf.set_auto_page_break(True, margin=10)
+    pdf.add_page()
+    pdf.set_font("Arial", size=10)
+    
+    x_start, y_start = 10, 10
+    w, h = 60, 40 # Label size
+    margin = 5
+    col, row = 0, 0
+    
+    for p in products:
+        x = x_start + (col * (w + margin))
+        y = y_start + (row * (h + margin))
+        
+        # Border
+        pdf.rect(x, y, w, h)
+        
+        # Text
+        pdf.set_xy(x + 2, y + 2)
+        pdf.set_font("Arial", 'B', 8)
+        pdf.multi_cell(w-4, 4, f"{p['name'][:35]}", align='C')
+        
+        pdf.set_xy(x + 2, y + 10)
+        pdf.set_font("Arial", '', 7)
+        pdf.cell(w-4, 4, f"ID: {p['id']} | Cat: {p['category'][:10]}", align='C')
+        
+        # QR Code
+        qr_bytes = generate_product_qr_image(p['id'], p['name'])
+        
+        # Save temp image
+        temp_path = f"temp_qr_{p['id']}.png"
+        with open(temp_path, "wb") as f:
+            f.write(qr_bytes)
+            
+        # Place Image
+        pdf.image(temp_path, x=x+20, y=y+16, w=20, h=20)
+        os.remove(temp_path)
+        
+        col += 1
+        if col >= 3:
+            col = 0
+            row += 1
+            if row >= 6:
+                row = 0
+                pdf.add_page()
+                
+    return pdf.output(dest='S').encode('latin-1')
+
 def parse_qr_input(data_str):
     """
     Parses simulated QR scan input.
@@ -82,12 +136,14 @@ def decode_qr_image(image_file):
 def get_sound_html(sound_type):
     """
     Returns HTML string to play sound.
-    sound_type: 'success' or 'error'
+    sound_type: 'success', 'error', 'click'
     """
     if sound_type == 'success':
         src = "https://www.soundjay.com/buttons/sounds/button-3.mp3"
-    else:
+    elif sound_type == 'error':
         src = "https://www.soundjay.com/buttons/sounds/button-10.mp3"
+    else: # click
+        src = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
         
     return f"""
     <audio autoplay>
@@ -361,10 +417,11 @@ def calculate_profit_loss(df_sales, df_products):
         "margin_percent": (net_profit / total_rev * 100) if total_rev > 0 else 0
     }, pd.DataFrame(pl_data)
 
-# --- NEW: DEAD STOCK & EXPIRY RISK ---
+# --- NEW: DEAD STOCK & EXPIRY RISK (FIXED LOGIC) ---
 def analyze_risk_inventory(df_products):
     """
     Analyzes Dead Stock (flagged) and Expiry Status.
+    Robust against 'NA' dates.
     """
     if df_products.empty: return {}, pd.DataFrame()
     
@@ -384,9 +441,9 @@ def analyze_risk_inventory(df_products):
         # Expiry Check
         exp_date_str = row.get('expiry_date')
         
-        if exp_date_str and exp_date_str != "NA":
+        if exp_date_str and str(exp_date_str).upper() != "NA":
             try:
-                exp_date = datetime.strptime(exp_date_str, "%Y-%m-%d")
+                exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
                 days_left = (exp_date - today).days
                 
                 if days_left < 0:
@@ -395,8 +452,10 @@ def analyze_risk_inventory(df_products):
                 elif days_left < 30:
                     status = "Near Expiry"
                     near_expiry_val += (row['stock'] * row['cost_price'])
-            except: pass
-        elif exp_date_str == "NA":
+            except: 
+                # Fallback if date parsing fails
+                pass
+        elif str(exp_date_str).upper() == "NA":
              status = "Non-Expirable"
             
         if is_dead:
@@ -416,6 +475,52 @@ def analyze_risk_inventory(df_products):
         "expired_loss": expired_stock_val,
         "near_expiry_risk": near_expiry_val
     }, pd.DataFrame(risk_data)
+
+# --- NEW: EXPIRY BOGO LOGIC (Feature #4) ---
+def calculate_expiry_bogo(cart_items):
+    """
+    Calculates Buy One Get One Free logic strictly for Near-Expiry items.
+    Returns: Discount Amount, List of message strings
+    """
+    if not cart_items: return 0.0, []
+    
+    today = datetime.now()
+    discount = 0.0
+    messages = []
+    
+    # Group items by ID to handle quantity
+    item_counts = {} # {id: {item_obj, count}}
+    
+    for item in cart_items:
+        if item['id'] not in item_counts:
+            item_counts[item['id']] = {'obj': item, 'count': 0}
+        item_counts[item['id']]['count'] += 1
+        
+    for pid, data in item_counts.items():
+        item = data['obj']
+        qty = data['count']
+        
+        # Check Expiry Logic
+        exp_date_str = item.get('expiry_date')
+        is_near_expiry = False
+        
+        if exp_date_str and str(exp_date_str).upper() != "NA":
+            try:
+                exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
+                days_left = (exp_date - today).days
+                if 0 <= days_left < 30:
+                    is_near_expiry = True
+            except: pass
+            
+        if is_near_expiry and qty >= 2:
+            # Logic: For every 2 bought, 1 is free (cost of 1 deducted)
+            # Actually BOGO implies: Buy 1, Get 1 Free. So pairs.
+            free_items = qty // 2
+            item_discount = free_items * item['price']
+            discount += item_discount
+            messages.append(f"BOGO Applied on {item['name']} (Expires Soon): -{item_discount:.2f}")
+            
+    return discount, messages
 
 # --- NEW: FINANCIAL RATIOS ---
 def calculate_financial_ratios(df_sales, df_products):
