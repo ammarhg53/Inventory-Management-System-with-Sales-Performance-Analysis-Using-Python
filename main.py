@@ -42,6 +42,7 @@ if 'initialized' not in st.session_state:
     st.session_state['qr_expiry'] = None
     st.session_state['selected_payment_mode'] = None
     st.session_state['undo_stack'] = []
+    st.session_state['redo_stack'] = []
     # Feature #1: Customer Session
     st.session_state['current_customer'] = None
     st.session_state['bill_mode'] = None
@@ -181,10 +182,12 @@ def login_view():
                     st.session_state['pos_id'] = term_in
                     
                     db.log_activity(user_in, "Login", f"Accessed {term_in}")
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                     st.success("Login Successful! Redirecting...")
                     time.sleep(0.5)
                     st.rerun()
                 else:
+                    st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                     st.error("❌ Invalid Username or Password")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -252,6 +255,7 @@ def pos_interface():
                 st.write("")
                 st.write("")
                 if st.button("🔎 Search / Add"):
+                    st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                     if cust_phone:
                         cust = db.get_customer(cust_phone)
                         if cust:
@@ -271,9 +275,11 @@ def pos_interface():
                             db.upsert_customer(cust_phone, new_name, new_email)
                             st.session_state['current_customer'] = db.get_customer(cust_phone)
                             st.session_state.pop('temp_new_customer', None)
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                             st.success("Customer Added!")
                             st.rerun()
                         else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error("Name is required.")
 
         st.markdown("---")
@@ -290,10 +296,12 @@ def pos_interface():
             if qr_input:
                 scanned_pid = utils.parse_qr_input(qr_input)
             elif cam_input:
+                # Fix 1: Robust Image Processing
                 decoded_text = utils.decode_qr_image(cam_input)
                 if decoded_text:
                     scanned_pid = utils.parse_qr_input(decoded_text)
                     if not scanned_pid:
+                        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                         st.error(f"Invalid Product QR: {decoded_text}")
                 else:
                     st.caption("No QR code detected.")
@@ -304,10 +312,13 @@ def pos_interface():
                     cart_qty = sum(1 for x in st.session_state['cart'] if x['id'] == scanned_pid)
                     if prod['stock'] > cart_qty:
                         st.session_state['cart'].append(prod)
+                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                         st.toast(f"Scanned: {prod['name']}")
                     else:
+                        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                         st.error("Out of Stock!")
                 else:
+                    st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                     st.error("Product Not Found")
 
         with col_manual:
@@ -354,6 +365,7 @@ def pos_interface():
                     if item['stock'] > cart_qty:
                         if st.button("Add ➕", key=f"add_{item['id']}"):
                             st.session_state['cart'].append(item)
+                            st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                             st.toast(f"Added {item['name']}")
                             st.rerun()
                     else:
@@ -387,10 +399,13 @@ def pos_interface():
                         if cpn:
                             if raw_total >= cpn['min_bill']:
                                 st.session_state['applied_coupon'] = cpn
+                                st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                                 st.success(f"Coupon Applied: {msg}")
                             else:
+                                st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                                 st.error(f"Min bill required: {cpn['min_bill']}")
                         else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error(msg)
                     except Exception as e:
                         st.error(f"Error applying coupon: {str(e)}")
@@ -415,6 +430,12 @@ def pos_interface():
                     if cp['type'] == 'Flat': discount = cp['value']
                     elif cp['type'] == '%': discount = raw_total * (cp['value']/100)
                 
+                # NEW FEATURE: Expiry BOGO (Additive Logic)
+                bogo_discount, bogo_msgs = utils.calculate_expiry_bogo(st.session_state['cart'])
+                if bogo_discount > 0:
+                    st.info(f"⚡ BOGO Offer Applied: {currency}{bogo_discount:.2f} Saved!")
+                    for msg in bogo_msgs: st.caption(f"• {msg}")
+
                 # Campaign Discount (Auto)
                 fest_disc = 0
                 fest_sales = active_campaigns[active_campaigns['type'] == 'Festival Offer']
@@ -423,7 +444,7 @@ def pos_interface():
                     fest_disc = raw_total * 0.05
                     st.caption(f"🎉 Festival Offer Applied (-{currency}{fest_disc:.2f})")
 
-                total_after_disc = raw_total - discount - fest_disc - st.session_state['points_to_redeem']
+                total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'] - bogo_discount)
                 
                 # Tax
                 gst_enabled = db.get_setting("gst_enabled") == 'True'
@@ -438,7 +459,7 @@ def pos_interface():
                 st.markdown(f"""
                 <div style='background:var(--secondary-bg); padding:10px; border-radius:8px; margin-top:10px;'>
                     <div style='display:flex; justify-content:space-between'><span>Subtotal:</span><span>{currency}{raw_total:.2f}</span></div>
-                    <div style='display:flex; justify-content:space-between; color:var(--success-color)'><span>Discount:</span><span>-{currency}{discount+fest_disc:.2f}</span></div>
+                    <div style='display:flex; justify-content:space-between; color:var(--success-color)'><span>Discount:</span><span>-{currency}{discount+fest_disc+bogo_discount:.2f}</span></div>
                     <div style='display:flex; justify-content:space-between; font-weight:bold; font-size:1.2em; margin-top:5px; border-top:1px solid var(--border-color); padding-top:5px;'>
                         <span>Total:</span><span>{currency}{final_total:,.2f}</span>
                     </div>
@@ -450,15 +471,18 @@ def pos_interface():
                     st.session_state['cart'] = []
                     st.session_state['applied_coupon'] = None
                     st.session_state['points_to_redeem'] = 0
+                    st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                     st.rerun()
                 if c_pay.button("💳 Proceed to Pay", type="primary", use_container_width=True):
                     if not st.session_state['current_customer']:
+                        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                         st.error("Please add Customer Details first!")
                     else:
+                        st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                         st.session_state['final_calc'] = {
                             "total": final_total, 
                             "tax": tax_amount, 
-                            "discount": discount + fest_disc,
+                            "discount": discount + fest_disc + bogo_discount, # Includes BOGO
                             "points": st.session_state['points_to_redeem']
                         }
                         st.session_state['checkout_stage'] = 'payment_method'
@@ -481,6 +505,7 @@ def pos_interface():
             if st.button("Select Cash", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'Cash'
                 st.session_state['checkout_stage'] = 'payment_process'
+                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c2:
             st.markdown("#### 📱 UPI / QR")
@@ -489,12 +514,14 @@ def pos_interface():
                 st.session_state['checkout_stage'] = 'payment_process'
                 st.session_state['qr_expiry'] = None # Reset Timer
                 st.session_state.pop('upi_txn_ref', None) # Reset Ref for new txn
+                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c3:
             st.markdown("#### 💳 Card")
             if st.button("Select Card", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'Card'
                 st.session_state['checkout_stage'] = 'payment_process'
+                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -518,6 +545,7 @@ def pos_interface():
                 if change >= 0:
                     st.success(f"✅ Sufficient Amount. Change to return: {currency}{change:,.2f}")
                     if st.button("Confirm Cash Payment", type="primary"):
+                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                         finalize_sale(total, "Cash")
                 else:
                     st.error(f"❌ Insufficient Cash. Short by: {currency}{abs(change):,.2f}")
@@ -553,6 +581,7 @@ def pos_interface():
                     upi_ref = st.text_input("Enter UPI Transaction ID (UT / Ref No)")
                     if st.button("Verify & Print Bill"):
                         if len(upi_ref) > 6:
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                             finalize_sale(total, "UPI")
                         else:
                             st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
@@ -585,6 +614,7 @@ def pos_interface():
                         time.sleep(2) # Artificial Delay
                         with st.spinner("Verifying Credentials..."):
                             time.sleep(1.5)
+                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                         finalize_sale(total, "Card")
                 else:
                     st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
@@ -614,6 +644,7 @@ def pos_interface():
                 st.session_state['applied_coupon'] = None
                 st.session_state['points_to_redeem'] = 0
                 st.session_state.pop('upi_txn_ref', None)
+                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -659,6 +690,8 @@ def finalize_sale(total, mode):
         )
         
         st.session_state['undo_stack'].append(sale_id)
+        # Clear Redo stack on new action
+        st.session_state['redo_stack'] = []
         
         tax_info = {"tax_amount": calc['tax'], "tax_percent": 18}
         # Updated pdf gen call
@@ -702,12 +735,23 @@ def inventory_manager():
             ds_action = st.radio("Set Status", ["Active", "Dead Stock"], horizontal=True)
             if st.button("Update Status"):
                 db.toggle_dead_stock(ds_id, ds_action == "Dead Stock")
+                st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                 st.success("Status Updated")
                 time.sleep(1)
                 st.rerun()
         
         with col_dead_2:
-            st.markdown("##### Generate QR Code for Product")
+            st.markdown("##### 🖨️ Bulk QR Label Printing (New)")
+            if st.button("Generate QR Labels PDF (All Items)"):
+                try:
+                    pdf_bytes = utils.generate_qr_labels_pdf(df_filtered.to_dict('records'))
+                    st.download_button("⬇️ Download Labels PDF", pdf_bytes, "qr_labels.pdf", "application/pdf")
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(f"Error generating PDF: {e}")
+            
+            st.markdown("---")
+            st.markdown("##### Generate Single QR")
             sel_prod_id = st.number_input("Enter Product ID to Generate QR", min_value=1, step=1)
             if st.button("Generate QR"):
                 p_data = db.get_product_by_id(sel_prod_id)
@@ -772,6 +816,7 @@ def inventory_manager():
                 qty = st.number_input("Add Quantity", min_value=1, value=10)
                 if st.button("Confirm Restock"):
                     db.restock_product(pid, qty)
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                     st.success("Stock Updated!")
                     time.sleep(1)
                     st.rerun()
@@ -787,6 +832,7 @@ def inventory_manager():
                 prod = db.get_product_by_id(r_pid)
                 if prod:
                     db.create_stock_request(r_pid, prod['name'], r_qty, r_note, st.session_state['user'])
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                     st.success("Request Submitted")
                 else: st.error("Invalid Product ID")
         st.divider()
@@ -1024,13 +1070,41 @@ def admin_panel():
             db.force_clear_all_sessions()
             st.success("All session locks cleared.")
         st.markdown("---")
-        if st.session_state['undo_stack']:
-            last_sale_id = st.session_state['undo_stack'][-1]
-            st.warning(f"Ready to undo Sale ID: #{last_sale_id}")
-            if st.button("Undo Last Sale"):
-                st.session_state['undo_stack'].pop()
-                st.success(f"Sale #{last_sale_id} rolled back! (Simulation)")
-        else: st.info("No recent transactions to undo.")
+        
+        # ISSUE 5 FIX: UNDO/REDO TRANSACTION
+        c_undo, c_redo = st.columns(2)
+        with c_undo:
+            if st.session_state['undo_stack']:
+                last_sale_id = st.session_state['undo_stack'][-1]
+                st.warning(f"Ready to undo Sale ID: #{last_sale_id}")
+                if st.button("↩️ Undo Last Sale"):
+                    success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'])
+                    if success:
+                        st.session_state['redo_stack'].append(st.session_state['undo_stack'].pop())
+                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                        st.success(f"Order #{last_sale_id} cancelled successfully.")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {msg}")
+            else: st.info("No recent transactions to undo.")
+        
+        with c_redo:
+            if st.session_state['redo_stack']:
+                last_undo_id = st.session_state['redo_stack'][-1]
+                st.info(f"Ready to Redo Sale ID: #{last_undo_id}")
+                if st.button("↪️ Redo Cancelled Sale"):
+                    success, msg = db.redo_sale_transaction(last_undo_id, st.session_state['user'])
+                    if success:
+                        st.session_state['undo_stack'].append(st.session_state['redo_stack'].pop())
+                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                        st.success(f"Order #{last_undo_id} restored.")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Failed: {msg}")
+            else: st.info("No actions to redo.")
+
         st.markdown("---")
         if st.button("Create System Backup (Algo #28)"):
             path = utils.backup_system()
