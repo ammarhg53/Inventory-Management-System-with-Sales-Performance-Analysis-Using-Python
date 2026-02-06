@@ -553,7 +553,19 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     return pdf.output(dest='S').encode('latin-1')
 
 def generate_upi_qr(vpa, name, amount, note):
-    params = {"pa": vpa, "pn": name, "am": f"{amount:.2f}", "cu": "INR", "tn": note}
+    # Fix for Google Pay bank name issue (Point #7)
+    if not name: name = "Merchant"
+    
+    params = {
+        "pa": vpa, 
+        "pn": name, 
+        "am": f"{amount:.2f}", 
+        "cu": "INR", 
+        "tn": note,
+        "mc": "0000", # Mandatory for UPI compliance
+        "mode": "02", # Secure QR mode
+        "orgid": "000000" # Organization ID placeholder
+    }
     url = f"upi://pay?{urllib.parse.urlencode(params)}"
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(url)
@@ -562,3 +574,40 @@ def generate_upi_qr(vpa, name, amount, note):
     buf = BytesIO()
     img.save(buf)
     return buf.getvalue()
+
+def validate_card(number, expiry, cvv):
+    """Validates card details using Luhn Algorithm and basic checks."""
+    # Length check
+    if not number.isdigit() or not (13 <= len(number) <= 19):
+        return False, "Invalid Card Number Length (13-19 digits required)"
+    
+    # CVV Check
+    if not cvv.isdigit() or not (3 <= len(cvv) <= 4):
+        return False, "Invalid CVV (3-4 digits required)"
+    
+    # Expiry Check
+    try:
+        if "/" not in expiry: return False, "Invalid Expiry Format (Use MM/YY)"
+        exp_m, exp_y = map(int, expiry.split('/'))
+        if not (1 <= exp_m <= 12): return False, "Invalid Month"
+        current_year = int(datetime.now().strftime("%y"))
+        if exp_y < current_year: return False, "Card Expired"
+    except:
+        return False, "Invalid Expiry Date"
+
+    # Luhn Algorithm
+    digits = [int(d) for d in number]
+    checksum = digits.pop()
+    digits.reverse()
+    doubled = []
+    for i, d in enumerate(digits):
+        if i % 2 == 0:
+            d *= 2
+            if d > 9: d -= 9
+        doubled.append(d)
+    total = sum(doubled) + checksum
+    
+    if total % 10 == 0:
+        return True, "Valid"
+    else:
+        return False, "Invalid Card Number (Luhn Check Failed)"
