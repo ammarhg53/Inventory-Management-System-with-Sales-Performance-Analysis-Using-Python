@@ -12,13 +12,117 @@ from datetime import datetime, timedelta
 import shutil
 import os
 import json
-from PIL import Image
+from PIL import Image, ImageTk
+import tkinter as tk
+import cv2
 
 # Import pyzbar for QR decoding (Fix #2)
 try:
     from pyzbar.pyzbar import decode as qr_decode
 except ImportError:
     qr_decode = None
+
+# --- REAL-TIME LIVE SCANNER (NEW FEATURE) ---
+class LiveBarcodeScanner:
+    def __init__(self):
+        self.detected_code = None
+        self.cap = None
+        self.root = None
+        self.panel = None
+
+    def start_scanner(self):
+        """
+        Opens a Tkinter window showing live video feed.
+        Scans for barcodes/QRs in real-time.
+        Auto-closes upon detection.
+        """
+        # Initialize Camera
+        self.cap = cv2.VideoCapture(0)
+        
+        if not self.cap.isOpened():
+            return None, "Error: Could not access camera."
+
+        # Setup GUI Window
+        self.root = tk.Tk()
+        self.root.title("POS Live Scanner - Point at Barcode")
+        self.root.geometry("640x520")
+        self.root.resizable(False, False)
+        
+        # UI Elements
+        lbl_instruct = tk.Label(self.root, text="Scanning... Hold product steady.", font=("Arial", 12), bg="black", fg="white")
+        lbl_instruct.pack(fill=tk.X)
+        
+        self.panel = tk.Label(self.root)
+        self.panel.pack(padx=10, pady=10)
+        
+        btn_cancel = tk.Button(self.root, text="Cancel Scan", command=self.close_scanner, bg="#ef4444", fg="white", font=("Arial", 10, "bold"))
+        btn_cancel.pack(pady=5)
+
+        # Start Video Loop
+        self.video_loop()
+        
+        # Start GUI
+        self.root.protocol("WM_DELETE_WINDOW", self.close_scanner)
+        self.root.mainloop()
+        
+        # Cleanup
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+            
+        return self.detected_code
+
+    def video_loop(self):
+        if self.detected_code: return # Stop if found
+
+        ret, frame = self.cap.read()
+        if ret:
+            # 1. Detect Barcode
+            decoded_objects = qr_decode(frame)
+            
+            # 2. Visual Feedback (Draw Box)
+            for obj in decoded_objects:
+                points = obj.polygon
+                if len(points) == 4:
+                    pts = np.array(points, dtype=np.int32)
+                    cv2.polylines(frame, [pts], True, (0, 255, 0), 3)
+                
+                # 3. Capture Data & Close
+                raw_data = obj.data.decode("utf-8")
+                self.detected_code = raw_data
+                self.root.after(500, self.close_scanner) # Delay slightly to show green box
+                
+            # Convert to Tkinter Image
+            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            img = Image.fromarray(cv2image)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.panel.imgtk = imgtk
+            self.panel.config(image=imgtk)
+            
+            # Loop
+            self.root.after(10, self.video_loop)
+        else:
+            self.close_scanner()
+
+    def close_scanner(self):
+        if self.root:
+            self.root.quit()
+            self.root.destroy()
+            self.root = None
+
+def run_live_scan():
+    """Wrapper function to invoke the scanner safely."""
+    if qr_decode is None:
+        return None, "Error: pyzbar library not installed."
+    
+    scanner = LiveBarcodeScanner()
+    try:
+        code = scanner.start_scanner()
+        if code:
+            return code, "Success"
+        else:
+            return None, "Scan cancelled or no code found."
+    except Exception as e:
+        return None, f"Scanner Error: {str(e)}"
 
 # --- FEATURE 5: LOYALTY LOGIC ---
 def calculate_loyalty_points(amount):
