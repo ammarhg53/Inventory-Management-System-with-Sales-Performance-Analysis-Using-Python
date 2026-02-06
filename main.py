@@ -291,27 +291,9 @@ def pos_interface():
             st.markdown("##### 📷 Scan QR")
             qr_input = st.text_input("Simulate Scan (PROD:ID)", key="qr_scan_input", help="Simulate scanner input here")
             
-            if st.button("🎥 Start Live Scanner", help="Opens webcam for real-time barcode scanning"):
-                detected_code, msg = utils.run_live_scan()
-                if detected_code:
-                    scanned_pid = utils.parse_qr_input(detected_code)
-                    if scanned_pid:
-                        prod = db.get_product_by_id(scanned_pid)
-                        if prod:
-                            st.session_state['cart'].append(prod)
-                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
-                            st.success(f"Added: {prod['name']}")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.error("Product not found in inventory")
-                    else:
-                        st.error(f"Invalid QR Format: {detected_code}")
-                else:
-                    if "pyzbar" in msg:
-                        st.error(msg)
-                    else:
-                        st.warning(msg)
+            # --- FIX: DISABLE CAMERA FOR EXAM DEPLOYMENT ---
+            if st.button("🎥 Start Live Scanner", disabled=True, help="Disabled for exam deployment"):
+                 st.warning("Camera scanning disabled for exam-ready deployment.")
 
             scanned_pid = None
             if qr_input:
@@ -532,9 +514,21 @@ def pos_interface():
 
     elif st.session_state['checkout_stage'] == 'payment_process':
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        c_back, c_title = st.columns([1, 5])
-        c_back.button("⬅ Cancel", on_click=lambda: st.session_state.update({'checkout_stage': 'payment_method'}))
         
+        # --- FIX: INSTANT PAYMENT METHOD SWITCHING ---
+        col_back, col_switch = st.columns([1, 4])
+        with col_back:
+            st.button("⬅ Cancel", on_click=lambda: st.session_state.update({'checkout_stage': 'payment_method'}))
+        with col_switch:
+            modes = ["Cash", "UPI", "Card"]
+            curr_mode = st.session_state['selected_payment_mode']
+            new_mode = st.radio("Switch Payment Mode", modes, index=modes.index(curr_mode), horizontal=True, label_visibility="collapsed")
+            if new_mode != curr_mode:
+                st.session_state['selected_payment_mode'] = new_mode
+                st.session_state['qr_expiry'] = None
+                st.session_state.pop('upi_txn_ref', None)
+                st.rerun()
+
         calc = st.session_state['final_calc']
         total = calc['total']
         mode = st.session_state['selected_payment_mode']
@@ -654,6 +648,10 @@ def pos_interface():
         st.markdown("</div>", unsafe_allow_html=True)
 
 def finalize_sale(total, mode):
+    # --- REAL-TIME SIMULATION FIX ---
+    with st.spinner(f"Processing {mode} Transaction..."):
+        time.sleep(1.5)
+
     calc = st.session_state['final_calc']
     txn_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     operator = st.session_state['full_name']
