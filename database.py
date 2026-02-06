@@ -187,7 +187,6 @@ def init_db():
     ]
     for u, p, r, n in users:
         ph = hashlib.sha256(p.encode()).hexdigest()
-        # FIX: Changed INSERT OR IGNORE to INSERT OR REPLACE to ensure password updates and fixes are applied
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
     c.execute("SELECT count(*) FROM products")
@@ -244,10 +243,6 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                              points_earned, integrity_hash, time_taken):
     """
     Handles the entire sale process in a SINGLE database connection to prevent 'database is locked' errors.
-    1. Updates Stock
-    2. Updates Coupon Usage
-    3. Inserts Sale Record
-    4. Updates Customer Stats & Loyalty
     """
     conn = get_connection()
     c = conn.cursor()
@@ -539,11 +534,12 @@ def pick_lucky_winner(days_lookback, min_spend):
     start_dt = (datetime.now() - timedelta(days=days_lookback)).strftime("%Y-%m-%d")
     conn = get_connection()
     
-    # Select distinct customers eligible
+    # FIX: Updated query to handle empty strings/NULLs for mobile to ensure a valid winner is picked
     query = f"""
     SELECT DISTINCT customer_mobile
     FROM sales 
-    WHERE timestamp >= '{start_dt}' AND total_amount >= {min_spend} AND customer_mobile IS NOT NULL
+    WHERE timestamp >= '{start_dt}' AND total_amount >= {min_spend} 
+    AND customer_mobile IS NOT NULL AND customer_mobile != '' AND customer_mobile != 'None'
     """
     df = pd.read_sql(query, conn)
     
@@ -552,7 +548,9 @@ def pick_lucky_winner(days_lookback, min_spend):
         winner_mobile = random.choice(df['customer_mobile'].tolist())
         # Get name
         cust = get_customer(winner_mobile)
-        winner = {"name": cust['name'], "mobile": winner_mobile}
+        name_val = cust['name'] if cust else "Unknown Customer"
+        
+        winner = {"name": name_val, "mobile": winner_mobile}
         
         # Log it
         c = conn.cursor()
@@ -900,14 +898,19 @@ def get_transaction_history(filters=None):
     query += " ORDER BY id DESC"
     
     conn = get_connection()
-    df = pd.read_sql(query, conn, params=params)
-    conn.close()
+    # FIX: Robustly handle potential issues with data types or empty results
+    try:
+        df = pd.read_sql(query, conn, params=params)
+    except:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
     return df
 
 def get_full_logs():
     """Retrieves all system logs."""
     conn = get_connection()
-    df = pd.read_sql("SELECT * FROM logs ORDER BY timestamp DESC", conn)
+    df = pd.read_sql("SELECT * FROM logs ORDER BY id DESC", conn)
     conn.close()
     return df
 
