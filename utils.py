@@ -12,6 +12,13 @@ from datetime import datetime, timedelta
 import shutil
 import os
 import json
+from PIL import Image
+
+# Import pyzbar for QR decoding (Fix #2)
+try:
+    from pyzbar.pyzbar import decode as qr_decode
+except ImportError:
+    qr_decode = None
 
 # --- FEATURE 5: LOYALTY LOGIC ---
 def calculate_loyalty_points(amount):
@@ -55,6 +62,19 @@ def parse_qr_input(data_str):
         if data_str.startswith("PROD:"):
             return int(data_str.split(":")[1])
     except:
+        return None
+    return None
+
+def decode_qr_image(image_file):
+    """Decodes QR code from an image file using pyzbar. Fixes issue #2."""
+    if qr_decode is None:
+        return None
+    try:
+        image = Image.open(image_file)
+        decoded_objects = qr_decode(image)
+        for obj in decoded_objects:
+            return obj.data.decode("utf-8")
+    except Exception as e:
         return None
     return None
 
@@ -459,6 +479,7 @@ class PDFReceipt(FPDF):
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None):
+    # Added required fields to receipt PDF as requested in #5
     logo_path = "logo.png" if os.path.exists("logo.png") else None
     
     pdf = PDFReceipt(store_name, logo_path)
@@ -470,6 +491,7 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     pdf.cell(0, 6, f"Date: {time_str}", 0, 1, 'R')
     pdf.cell(100, 6, f"Cashier: {operator}", 0, 0)
     pdf.cell(0, 6, f"POS: {pos}", 0, 1, 'R')
+    pdf.cell(100, 6, f"Payment Mode: {mode}", 0, 1, 'L')
     
     if customer:
         pdf.ln(5)
@@ -513,8 +535,6 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     # Tax and Discount Section
     subtotal = total
     if tax_info:
-        # Reconstruct if logic was tax included/excluded
-        # Just display raw
         pass
 
     if tax_info and tax_info.get('tax_amount', 0) > 0:
