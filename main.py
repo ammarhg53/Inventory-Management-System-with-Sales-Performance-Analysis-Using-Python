@@ -289,22 +289,33 @@ def pos_interface():
             st.markdown("##### 📷 Scan QR")
             # Text based scan
             qr_input = st.text_input("Simulate Scan (PROD:ID)", key="qr_scan_input", help="Simulate scanner input here")
-            # Camera scan
-            cam_input = st.camera_input("Use Camera")
             
+            # --- REAL-TIME LIVE SCANNER INTEGRATION ---
+            if st.button("🎥 Start Live Scanner", help="Opens webcam for real-time barcode scanning"):
+                detected_code, msg = utils.run_live_scan()
+                if detected_code:
+                    scanned_pid = utils.parse_qr_input(detected_code)
+                    if scanned_pid:
+                        prod = db.get_product_by_id(scanned_pid)
+                        if prod:
+                            st.session_state['cart'].append(prod)
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                            st.success(f"Added: {prod['name']}")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Product not found in inventory")
+                    else:
+                        st.error(f"Invalid QR Format: {detected_code}")
+                else:
+                    if "pyzbar" in msg:
+                        st.error(msg)
+                    else:
+                        st.warning(msg)
+
             scanned_pid = None
             if qr_input:
                 scanned_pid = utils.parse_qr_input(qr_input)
-            elif cam_input:
-                # Fix 1: Robust Image Processing
-                decoded_text = utils.decode_qr_image(cam_input)
-                if decoded_text:
-                    scanned_pid = utils.parse_qr_input(decoded_text)
-                    if not scanned_pid:
-                        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
-                        st.error(f"Invalid Product QR: {decoded_text}")
-                else:
-                    st.caption("No QR code detected.")
 
             if scanned_pid:
                 prod = db.get_product_by_id(scanned_pid)
@@ -430,11 +441,11 @@ def pos_interface():
                     if cp['type'] == 'Flat': discount = cp['value']
                     elif cp['type'] == '%': discount = raw_total * (cp['value']/100)
                 
-                # NEW FEATURE: Expiry BOGO (Additive Logic)
-                bogo_discount, bogo_msgs = utils.calculate_expiry_bogo(st.session_state['cart'])
-                if bogo_discount > 0:
-                    st.info(f"⚡ BOGO Offer Applied: {currency}{bogo_discount:.2f} Saved!")
-                    for msg in bogo_msgs: st.caption(f"• {msg}")
+                # NEW FEATURE: Expiry-Based Loss Prevention (Stepwise Logic)
+                loss_discount, loss_msgs = utils.calculate_advanced_loss_prevention(st.session_state['cart'])
+                if loss_discount > 0:
+                    st.warning(f"⚠️ Loss Prevention Discount: {currency}{loss_discount:.2f}")
+                    for msg in loss_msgs: st.caption(f"• {msg}")
 
                 # Campaign Discount (Auto)
                 fest_disc = 0
@@ -444,7 +455,8 @@ def pos_interface():
                     fest_disc = raw_total * 0.05
                     st.caption(f"🎉 Festival Offer Applied (-{currency}{fest_disc:.2f})")
 
-                total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'] - bogo_discount)
+                # Ensure total is not negative
+                total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'] - loss_discount)
                 
                 # Tax
                 gst_enabled = db.get_setting("gst_enabled") == 'True'
@@ -459,34 +471,39 @@ def pos_interface():
                 st.markdown(f"""
                 <div style='background:var(--secondary-bg); padding:10px; border-radius:8px; margin-top:10px;'>
                     <div style='display:flex; justify-content:space-between'><span>Subtotal:</span><span>{currency}{raw_total:.2f}</span></div>
-                    <div style='display:flex; justify-content:space-between; color:var(--success-color)'><span>Discount:</span><span>-{currency}{discount+fest_disc+bogo_discount:.2f}</span></div>
+                    <div style='display:flex; justify-content:space-between; color:var(--success-color)'><span>Discount:</span><span>-{currency}{discount+fest_disc+loss_discount:.2f}</span></div>
                     <div style='display:flex; justify-content:space-between; font-weight:bold; font-size:1.2em; margin-top:5px; border-top:1px solid var(--border-color); padding-top:5px;'>
                         <span>Total:</span><span>{currency}{final_total:,.2f}</span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                c_clear, c_pay = st.columns(2)
-                if c_clear.button("🗑️ Clear Cart", use_container_width=True):
-                    st.session_state['cart'] = []
-                    st.session_state['applied_coupon'] = None
-                    st.session_state['points_to_redeem'] = 0
-                    st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                    st.rerun()
-                if c_pay.button("💳 Proceed to Pay", type="primary", use_container_width=True):
-                    if not st.session_state['current_customer']:
-                        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
-                        st.error("Please add Customer Details first!")
-                    else:
+                st.markdown("---") # Visual separator for clear checkout action
+                c_clear, c_pay = st.columns([1, 2]) # 1:2 ratio to emphasize Pay button
+                
+                with c_clear:
+                    if st.button("🗑️ Clear Cart", use_container_width=True):
+                        st.session_state['cart'] = []
+                        st.session_state['applied_coupon'] = None
+                        st.session_state['points_to_redeem'] = 0
                         st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                        st.session_state['final_calc'] = {
-                            "total": final_total, 
-                            "tax": tax_amount, 
-                            "discount": discount + fest_disc + bogo_discount, # Includes BOGO
-                            "points": st.session_state['points_to_redeem']
-                        }
-                        st.session_state['checkout_stage'] = 'payment_method'
                         st.rerun()
+                
+                with c_pay:
+                    if st.button("💳 Proceed to Pay", type="primary", use_container_width=True):
+                        if not st.session_state['current_customer']:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                            st.error("Please add Customer Details first!")
+                        else:
+                            st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
+                            st.session_state['final_calc'] = {
+                                "total": final_total, 
+                                "tax": tax_amount, 
+                                "discount": discount + fest_disc + loss_discount,
+                                "points": st.session_state['points_to_redeem']
+                            }
+                            st.session_state['checkout_stage'] = 'payment_method'
+                            st.rerun()
             else:
                 st.info("Cart is empty")
                 st.button("Proceed to Pay", disabled=True)
@@ -692,6 +709,9 @@ def finalize_sale(total, mode):
         st.session_state['undo_stack'].append(sale_id)
         # Clear Redo stack on new action
         st.session_state['redo_stack'] = []
+        
+        # LOGGING (Explicitly added to ensure logs work)
+        db.log_activity(operator, "Sale Completed", f"Sale #{sale_id} for {currency}{total:.2f}")
         
         tax_info = {"tax_amount": calc['tax'], "tax_percent": 18}
         # Updated pdf gen call
@@ -1081,6 +1101,7 @@ def admin_panel():
                     success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'])
                     if success:
                         st.session_state['redo_stack'].append(st.session_state['undo_stack'].pop())
+                        db.log_activity(st.session_state['user'], "Undo", f"Cancelled sale #{last_sale_id}")
                         st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                         st.success(f"Order #{last_sale_id} cancelled successfully.")
                         time.sleep(1)
@@ -1097,6 +1118,7 @@ def admin_panel():
                     success, msg = db.redo_sale_transaction(last_undo_id, st.session_state['user'])
                     if success:
                         st.session_state['undo_stack'].append(st.session_state['redo_stack'].pop())
+                        db.log_activity(st.session_state['user'], "Redo", f"Restored sale #{last_undo_id}")
                         st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                         st.success(f"Order #{last_undo_id} restored.")
                         time.sleep(1)
@@ -1141,6 +1163,7 @@ def admin_panel():
                     db.set_setting("default_bill_mode", s_mode)
                     if uploaded_logo:
                         with open("logo.png", "wb") as f: f.write(uploaded_logo.getbuffer())
+                    db.log_activity(st.session_state['user'], "Settings Update", "System settings modified")
                     st.success("Settings Saved!")
                     time.sleep(1)
                     st.rerun()
@@ -1190,14 +1213,17 @@ def admin_panel():
              st.error("⛔ Access Denied. Administrator privileges required.")
         else:
             with st.expander("Create New User"):
-                with st.form("new_user_form"):
+                # FIX: Added clear_on_submit=True to flush the form
+                with st.form("new_user_form", clear_on_submit=True):
                     nu_user = st.text_input("Username")
                     nu_pass = st.text_input("Password", type="password")
                     nu_name = st.text_input("Full Name")
                     nu_role = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
                     if st.form_submit_button("Create User"):
-                        if db.create_user(nu_user, nu_pass, nu_role, nu_name): st.success("User Created"); st.rerun()
-                        else: st.error("Error")
+                        if db.create_user(nu_user, nu_pass, nu_role, nu_name): 
+                            db.log_activity(st.session_state['user'], "User Created", f"Created user {nu_user}")
+                            st.success(f"User '{nu_user}' created successfully")
+                        else: st.error("Error creating user")
             
             st.subheader("Manage User Status (Feature #1)")
             users = db.get_all_users()
@@ -1211,6 +1237,7 @@ def admin_panel():
                         new_stat = c2.selectbox("Status", ["Active", "Disabled"], index=0 if u['status'] == 'Active' else 1, key=f"u_stat_{u['username']}")
                         if new_stat != u['status']:
                             db.update_user_status(u['username'], new_stat)
+                            db.log_activity(st.session_state['user'], "User Status Update", f"Set {u['username']} to {new_stat}")
                             st.toast(f"User {u['username']} updated to {new_stat}")
                             time.sleep(0.5)
                             st.rerun()
@@ -1267,12 +1294,15 @@ def admin_panel():
             ld_min = st.number_input("Min Spend Eligibility", min_value=100, value=1000)
         
         if st.button("🎰 Run Lucky Draw"):
-            winner = db.pick_lucky_winner(ld_days, ld_min)
-            if winner:
-                st.balloons()
-                st.success(f"🎉 WINNER: {winner['name']} ({winner['mobile']})")
-            else:
-                st.warning("No eligible customers found for this criteria.")
+            with st.spinner("Analyzing sales data..."):
+                time.sleep(1.5)
+                winner = db.pick_lucky_winner(ld_days, ld_min)
+                if winner:
+                    st.balloons()
+                    st.success(f"🎉 WINNER: {winner['name']} ({winner['mobile']})")
+                    db.log_activity(st.session_state['user'], "Lucky Draw", f"Winner selected: {winner['name']}")
+                else:
+                    st.warning("No eligible customers found for this criteria.")
         
         st.dataframe(db.get_lucky_draw_history(), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1307,7 +1337,10 @@ def admin_panel():
         if f_date: filters['date'] = f_date
         
         txns = db.get_transaction_history(filters)
-        st.dataframe(txns, use_container_width=True)
+        if not txns.empty:
+            st.dataframe(txns, use_container_width=True)
+        else:
+            st.info("No transactions found.")
         st.markdown("</div>", unsafe_allow_html=True)
         
     with tab_logs:
@@ -1325,6 +1358,7 @@ def user_profile_page():
         if st.form_submit_button("Update Profile"):
             db.update_fullname(st.session_state['user'], new_name)
             st.session_state['full_name'] = new_name
+            db.log_activity(st.session_state['user'], "Profile Update", "Updated full name")
             st.success("Updated")
     st.divider()
     st.subheader("Change Password")
@@ -1334,6 +1368,7 @@ def user_profile_page():
         if st.form_submit_button("Change Password"):
             if db.verify_password(st.session_state['user'], old_p):
                 db.update_password(st.session_state['user'], new_p)
+                db.log_activity(st.session_state['user'], "Password Change", "Updated password")
                 st.success("Password Changed Successfully")
             else: st.error("Incorrect Old Password")
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1356,15 +1391,14 @@ def main():
             # Theme Toggle
             c_theme, c_lbl = st.columns([1, 4])
             with c_theme:
-                is_dark = st.session_state['theme'] == 'dark'
-                if st.checkbox("🌑", value=is_dark, label_visibility="collapsed"):
-                    if st.session_state['theme'] != 'dark':
-                        st.session_state['theme'] = 'dark'
-                        st.rerun()
-                elif st.session_state['theme'] == 'dark':
-                     st.session_state['theme'] = 'light'
-                     st.rerun()
-            with c_lbl: st.caption("Dark Mode")
+                # Cycle themes: dark -> light -> adaptive -> dark
+                current = st.session_state['theme']
+                if st.button("🎨", help="Switch Theme"):
+                    if current == 'dark': st.session_state['theme'] = 'light'
+                    elif current == 'light': st.session_state['theme'] = 'adaptive'
+                    else: st.session_state['theme'] = 'dark'
+                    st.rerun()
+            with c_lbl: st.caption(f"Theme: {st.session_state['theme'].capitalize()}")
 
             st.markdown("---")
             
