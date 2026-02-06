@@ -13,7 +13,14 @@ import shutil
 import os
 import json
 from PIL import Image
-import cv2
+
+# --- CONDITIONAL IMPORT FOR OPENCV (CLOUD COMPATIBILITY) ---
+# Streamlit Cloud (Linux) often lacks libGL.so.1 (OpenGL) required by cv2.
+# We catch the import error to prevent app crash on startup.
+try:
+    import cv2
+except (ImportError, OSError):
+    cv2 = None
 
 # Import pyzbar for QR decoding (Fix #2)
 try:
@@ -45,7 +52,8 @@ class LiveBarcodeScanner:
         Scans for barcodes/QRs in real-time.
         Auto-closes upon detection.
         """
-        if tk is None:
+        # Safety checks for dependencies
+        if tk is None or cv2 is None:
             return None
 
         # Initialize Camera
@@ -131,6 +139,9 @@ def run_live_scan():
     # CLOUD SAFETY CHECK
     if tk is None:
         return None, "⚠️ Live camera scanning is disabled in Cloud Runtime (Tkinter missing). Use manual entry."
+    
+    if cv2 is None:
+        return None, "⚠️ Live camera scanning is disabled (OpenCV libGL missing). Use manual entry."
     
     scanner = LiveBarcodeScanner()
     try:
