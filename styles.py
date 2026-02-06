@@ -15,7 +15,20 @@ def load_css(theme="dark"):
         border_color = "rgba(255, 255, 255, 0.1)"
         shadow = "0 4px 6px -1px rgba(0, 0, 0, 0.3)"
         muted_text = "#94a3b8"
-    else:
+    elif theme == "adaptive":
+        # Professional Adaptive Theme
+        primary_bg = "#f3f4f6" # Gray 100
+        secondary_bg = "#ffffff" # White
+        text_color = "#111827" # Gray 900
+        accent_color = "#2563eb" # Blue 600
+        success_color = "#059669" # Emerald 600
+        warning_color = "#d97706" # Amber 600
+        error_color = "#dc2626" # Red 600
+        card_bg = "rgba(255, 255, 255, 0.95)"
+        border_color = "rgba(0, 0, 0, 0.1)"
+        shadow = "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)"
+        muted_text = "#4b5563"
+    else: # light (Classic)
         primary_bg = "#f8fafc" # Slate 50
         secondary_bg = "#ffffff" # White
         text_color = "#0f172a" # Slate 900
