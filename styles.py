@@ -1,4 +1,5 @@
 import streamlit as st
+import base64
 
 def load_css(theme="dark"):
     # Define Color Palettes
@@ -140,9 +141,10 @@ def load_css(theme="dark"):
             border-color: var(--accent-color);
         }}
         
-        .product-icon {{ font-size: 2.2rem; margin-bottom: 12px; }}
+        .product-icon {{ font-size: 2.2rem; margin-bottom: 12px; text-align: center; }}
         .product-title {{ font-size: 1rem; font-weight: 600; color: var(--text-color); margin-bottom: 4px; }}
         .product-cat {{ font-size: 0.7rem; text-transform: uppercase; color: var(--muted-text); margin-bottom: 12px; }}
+        .product-img {{ width: 100%; height: 120px; object-fit: cover; border-radius: 8px; margin-bottom: 10px; }}
 
         .product-footer {{
             display: flex; justify-content: space-between; align-items: center;
@@ -183,7 +185,7 @@ def load_css(theme="dark"):
     </style>
     """, unsafe_allow_html=True)
 
-def product_card_html(name, price, stock, category, currency_symbol="₹"):
+def product_card_html(name, price, stock, category, currency_symbol="₹", image_data=None):
     if stock < 5:
         badge_class = "badge-danger"
         stock_text = f"Low: {stock}"
@@ -191,17 +193,26 @@ def product_card_html(name, price, stock, category, currency_symbol="₹"):
         badge_class = "badge-success"
         stock_text = f"Stock: {stock}"
     
-    icon_map = {
-        "Electronics": "💻", "Groceries": "🥦", "Beverages": "🥤",
-        "Fashion": "👕", "Stationery": "✏️", "Health": "💊",
-        "Snacks": "🍟", "Dairy": "🧀", "Bakery": "🥐", "Frozen": "🧊"
-    }
-    icon = icon_map.get(category, "📦")
+    # Handle Image
+    if image_data:
+        try:
+            b64_img = base64.b64encode(image_data).decode('utf-8')
+            visual = f'<img src="data:image/png;base64,{b64_img}" class="product-img" />'
+        except:
+            visual = f'<div class="product-icon">📦</div>'
+    else:
+        icon_map = {
+            "Electronics": "💻", "Groceries": "🥦", "Beverages": "🥤",
+            "Fashion": "👕", "Stationery": "✏️", "Health": "💊",
+            "Snacks": "🍟", "Dairy": "🧀", "Bakery": "🥐", "Frozen": "🧊"
+        }
+        icon = icon_map.get(category, "📦")
+        visual = f'<div class="product-icon">{icon}</div>'
 
     return f"""
     <div class="product-card">
         <div>
-            <div class="product-icon">{icon}</div>
+            {visual}
             <div class="product-cat">{category}</div>
             <div class="product-title" title="{name}">{name}</div>
         </div>
