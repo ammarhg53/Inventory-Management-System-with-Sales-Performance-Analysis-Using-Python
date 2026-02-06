@@ -555,6 +555,7 @@ def pos_interface():
                         if len(upi_ref) > 6:
                             finalize_sale(total, "UPI")
                         else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error("Invalid Transaction ID")
                     time.sleep(1)
                     st.rerun()
@@ -570,16 +571,25 @@ def pos_interface():
             st.info("💳 Card Payment Simulation")
             col_cc1, col_cc2 = st.columns(2)
             with col_cc1:
-                st.text_input("Card Holder Name")
-                st.text_input("Card Number (Last 4 digits)", max_chars=4)
+                cc_name = st.text_input("Card Holder Name")
+                cc_num = st.text_input("Card Number (Last 4 digits or Full)", max_chars=16)
             with col_cc2:
-                st.text_input("Expiry (MM/YY)")
-                st.text_input("CVV", type="password", max_chars=3)
+                cc_exp = st.text_input("Expiry (MM/YY)")
+                cc_cvv = st.text_input("CVV", type="password", max_chars=4)
             
             if st.button("Process Transaction"):
-                with st.spinner("Contacting Bank Gateway..."):
-                    time.sleep(2.5) # Artificial Delay
-                    finalize_sale(total, "Card")
+                # Realistic Validation
+                valid, msg = utils.validate_card(cc_num, cc_exp, cc_cvv)
+                if valid:
+                    with st.spinner("Contacting Bank Gateway..."):
+                        time.sleep(2) # Artificial Delay
+                        with st.spinner("Verifying Credentials..."):
+                            time.sleep(1.5)
+                        finalize_sale(total, "Card")
+                else:
+                    st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                    st.error(f"Transaction Failed: {msg}")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     # --- STATE MACHINE: RECEIPT ---
@@ -625,7 +635,10 @@ def finalize_sale(total, mode):
     items_json = json.dumps([i['id'] for i in st.session_state['cart']])
     integrity_hash = utils.generate_integrity_hash((txn_time, total, items_json, operator))
     
-    coupon_code = st.session_state['applied_coupon']['code'] if st.session_state.get('applied_coupon') else None
+    # Safe Coupon Retrieval
+    coupon_code = None
+    if st.session_state.get('applied_coupon'):
+         coupon_code = st.session_state['applied_coupon']['code']
     
     # EXECUTE ATOMIC TRANSACTION (Resolves Locking)
     try:
@@ -652,11 +665,12 @@ def finalize_sale(total, mode):
         pdf = utils.generate_receipt_pdf(store_name, sale_id, txn_time, st.session_state['cart'], total, operator, mode, st.session_state['pos_id'], customer, tax_info)
         
         st.session_state['last_receipt'] = pdf
-        st.session_state['checkout_stage'] = 'receipt'
+        st.session_state['checkout_stage'] = 'receipt' # Force state change
         st.session_state['qr_expiry'] = None
         st.rerun()
         
     except Exception as e:
+        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
         st.error(f"Transaction Failed: {str(e)}")
 
 def inventory_manager():
@@ -706,7 +720,8 @@ def inventory_manager():
 
     with tab_add:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        with st.form("new_prod"):
+        # Fix 3: Added clear_on_submit=True to reset form after save
+        with st.form("new_prod", clear_on_submit=True):
             n = st.text_input("Product Name")
             c = st.selectbox("Category", db.get_categories_list())
             p = st.number_input("Selling Price", min_value=0.0)
@@ -727,9 +742,12 @@ def inventory_manager():
             if st.form_submit_button("Add Product"):
                 img_bytes = img_file.getvalue() if img_file else None
                 if db.add_product(n, c, p, s, cp, exp, img_bytes):
-                    st.success(f"Added {n}")
-                    st.rerun()
-                else: st.error("Error adding product")
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                    st.success(f"Product information stored successfully: {n}")
+                    # No rerun needed as clear_on_submit handles input reset
+                else: 
+                    st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                    st.error("Error adding product")
         st.markdown("</div>", unsafe_allow_html=True)
                     
     with tab_restock:
