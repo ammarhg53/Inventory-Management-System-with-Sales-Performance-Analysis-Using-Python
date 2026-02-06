@@ -270,7 +270,7 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                      tax_amount, discount_amount, coupon_applied, points_redeemed) 
                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (timestamp, total, items_json, integrity_hash, operator, mode, time_taken, 
-                 pos_id, customer_mobile, tax_amount, discount_amount, coupon_applied, points_redeemed))
+                 pos_id, customer_mobile, tax_amount, discount_amount, coupon_code, points_redeemed))
         sale_id = c.lastrowid
 
         # 4. Update Customer Stats
