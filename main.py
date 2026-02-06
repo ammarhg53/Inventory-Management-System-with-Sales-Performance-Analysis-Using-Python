@@ -21,7 +21,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# UI/UX ADDITION: Theme Management
 if 'theme' not in st.session_state:
     st.session_state['theme'] = 'dark'
 
@@ -30,7 +29,7 @@ styles.load_css(st.session_state['theme'])
 # --- INITIALIZATION ---
 if 'initialized' not in st.session_state:
     db.init_db()
-    db.seed_advanced_demo_data() # Updated to use advanced seeding
+    db.seed_advanced_demo_data() 
     st.session_state['initialized'] = True
     st.session_state['cart'] = []
     st.session_state['user'] = None
@@ -43,10 +42,8 @@ if 'initialized' not in st.session_state:
     st.session_state['selected_payment_mode'] = None
     st.session_state['undo_stack'] = []
     st.session_state['redo_stack'] = []
-    # Feature #1: Customer Session
     st.session_state['current_customer'] = None
     st.session_state['bill_mode'] = None
-    # Feature 2: Coupons
     st.session_state['applied_coupon'] = None
     st.session_state['points_to_redeem'] = 0
 
@@ -64,7 +61,6 @@ def refresh_trie():
         t.insert(row['name'], row.to_dict())
     return t, df
 
-# Cache Trie for performance
 if 'product_trie' not in st.session_state:
     trie, df_p = refresh_trie()
     st.session_state['product_trie'] = trie
@@ -72,10 +68,8 @@ if 'product_trie' not in st.session_state:
 
 # --- AUTHENTICATION MODULE ---
 def login_view():
-    # UI/UX ADDITION: Centered Container Layout with Side Panel
     c_left, c_center, c_right = st.columns([1, 2, 1])
     
-    # --- ISSUE 2 FIX: TERMINAL STATUS PANEL ---
     with c_left:
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.markdown("### 🖥️ POS Status")
@@ -84,17 +78,16 @@ def login_view():
         terminals = db.get_all_terminals()
         
         for index, row in terminals.iterrows():
-            # Color Coding for Status
             if row['status'] == 'Active':
-                status_color = "#10b981" # Green
+                status_color = "#10b981" 
                 status_icon = "🟢"
                 status_text = "Online"
             elif row['status'] == 'Maintenance':
-                status_color = "#f59e0b" # Yellow
+                status_color = "#f59e0b" 
                 status_icon = "🟡"
                 status_text = "Maintenance"
             else:
-                status_color = "#ef4444" # Red
+                status_color = "#ef4444" 
                 status_icon = "🔴"
                 status_text = "Disabled"
             
@@ -123,8 +116,6 @@ def login_view():
         st.markdown("<div class='login-box' style='margin: 0 auto;'>", unsafe_allow_html=True)
         st.subheader("🔐 Secure Access")
         
-        # Get terminals for dropdown (Allow selecting any to validate, or filter. 
-        # Filtering provides better UX, but validation ensures security.)
         active_ids = [t['id'] for _, t in terminals.iterrows() if t['status'] == 'Active']
         if "Office Dashboard" not in active_ids: active_ids.append("Office Dashboard")
         
@@ -137,12 +128,10 @@ def login_view():
             submit = st.form_submit_button("🚀 Access System", type="primary", use_container_width=True)
             
             if submit:
-                # 1. Validation
                 if not user_in or not pass_in:
                     st.error("Fields cannot be empty")
                     return
                 
-                # Check User Status (Feature 1)
                 try:
                     u_status = db.get_user_status(user_in)
                     if u_status != "Active":
@@ -151,20 +140,17 @@ def login_view():
                 except AttributeError:
                     pass
 
-                # --- ISSUE 3 FIX: TERMINAL ACCESS VALIDATION ---
                 t_status = db.check_terminal_status(term_in)
                 if term_in != "Office Dashboard" and t_status != "Active":
                     st.error(f"⛔ Terminal {term_in} is currently {t_status}. Access Blocked.")
                     return
 
-                # 2. Concurrency Check
                 occupied_by = db.is_pos_occupied(term_in)
                 if occupied_by and occupied_by != user_in:
                     st.error(f"⛔ Terminal {term_in} is currently locked by '{occupied_by}'.")
                     st.warning("Ask Admin to force unlock if this is an error.")
                     return
 
-                # 3. DB Check
                 h = utils.generate_hash(pass_in)
                 conn = db.get_connection()
                 c = conn.cursor()
@@ -191,7 +177,6 @@ def login_view():
                     st.error("❌ Invalid Username or Password")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Demo Credentials
         st.markdown("<br>", unsafe_allow_html=True)
         with st.expander("🔑 View Demo Credentials"):
             st.code("""
@@ -208,13 +193,12 @@ def logout_user():
         db.log_activity(user, "Logout", "Session Ended")
     
     st.session_state.clear()
-    st.session_state['theme'] = 'dark' # Keep preference
+    st.session_state['theme'] = 'dark' 
     st.rerun()
 
 # --- MODULES ---
 
 def pos_interface():
-    # --- POS HEADER & CAMPAIGNS ---
     st.markdown("<div class='card-container'>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([3, 1, 1])
     with c1:
@@ -245,11 +229,30 @@ def pos_interface():
 
     # --- STATE MACHINE: CART VIEW ---
     if st.session_state['checkout_stage'] == 'cart':
-        # Feature #1: Customer Identification Panel
+        
+        # --- FIX 8: MARKETING AWARENESS PANEL ---
+        with st.sidebar:
+            st.markdown("### 📢 Marketing & Offers")
+            st.info("Available Coupons for Customers")
+            active_coupons = db.get_all_coupons()
+            if not active_coupons.empty:
+                st.dataframe(active_coupons[['code', 'value', 'min_bill']], hide_index=True)
+            else:
+                st.caption("No Active Coupons")
+            
+            st.markdown("---")
+            st.warning("🔥 Clearance / Expiry Deals")
+            risk_sum, risk_df = utils.analyze_risk_inventory(df_p)
+            if not risk_df.empty:
+                clearance_items = risk_df[risk_df['Status'].isin(['Near Expiry', 'Expired'])]
+                if not clearance_items.empty:
+                    st.dataframe(clearance_items[['Name', 'Status']], hide_index=True)
+                else:
+                    st.caption("No Clearance Items")
+        
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
             col_c1, col_c2 = st.columns([2, 1])
             with col_c1:
-                # Fix: Strip whitespace to prevent duplicates
                 cust_phone = st.text_input("Customer Mobile", value=st.session_state['current_customer']['mobile'] if st.session_state['current_customer'] else "").strip()
             with col_c2:
                 st.write("")
@@ -283,14 +286,11 @@ def pos_interface():
                             st.error("Name is required.")
 
         st.markdown("---")
-        # FEATURE 6: QR SCAN INPUT & CAMERA
         col_scan, col_manual = st.columns([1, 2])
         with col_scan:
             st.markdown("##### 📷 Scan QR")
-            # Text based scan
             qr_input = st.text_input("Simulate Scan (PROD:ID)", key="qr_scan_input", help="Simulate scanner input here")
             
-            # --- REAL-TIME LIVE SCANNER INTEGRATION ---
             if st.button("🎥 Start Live Scanner", help="Opens webcam for real-time barcode scanning"):
                 detected_code, msg = utils.run_live_scan()
                 if detected_code:
@@ -339,7 +339,6 @@ def pos_interface():
                 query = st.text_input("Search Product", key="pos_search")
             with c_algo:
                 algo = st.selectbox("Search Algo", ["Trie (O(L))", "Linear (O(N))"])
-                # Fix 7: Algorithm Explanations
                 if algo.startswith("Trie"):
                     st.caption("ℹ️ **Trie**: Fast prefix search. Efficient for autocomplete.")
                 else:
@@ -366,7 +365,6 @@ def pos_interface():
             cols = st.columns(3)
             for i, item in enumerate(visible_items):
                 with cols[i % 3]:
-                    # Fix 4: Pass image data to card
                     st.markdown(styles.product_card_html(
                         item['name'], item['price'], item['stock'], item['category'], currency, item.get('image_data')
                     ), unsafe_allow_html=True)
@@ -401,7 +399,6 @@ def pos_interface():
                 
                 raw_total = summary['Total'].sum()
                 
-                # FEATURE 2: COUPONS (Fix #1: NameError Handler)
                 st.markdown("##### 🎟️ Coupons & Loyalty")
                 c_code = st.text_input("Enter Coupon Code")
                 if st.button("Apply Coupon"):
@@ -421,12 +418,10 @@ def pos_interface():
                     except Exception as e:
                         st.error(f"Error applying coupon: {str(e)}")
                 
-                # FEATURE 5: LOYALTY REDEMPTION
                 cust = st.session_state.get('current_customer')
                 if cust and cust['loyalty_points'] > 0:
                     use_points = st.checkbox(f"Redeem Points (Bal: {cust['loyalty_points']})")
                     if use_points:
-                        # 1 pt = 1 Rs (Simplification)
                         max_redeem = min(cust['loyalty_points'], int(raw_total))
                         st.session_state['points_to_redeem'] = max_redeem
                     else:
@@ -434,31 +429,25 @@ def pos_interface():
                 else:
                     st.session_state['points_to_redeem'] = 0
 
-                # Calc Totals
                 discount = 0
                 if st.session_state.get('applied_coupon'):
                     cp = st.session_state['applied_coupon']
                     if cp['type'] == 'Flat': discount = cp['value']
                     elif cp['type'] == '%': discount = raw_total * (cp['value']/100)
                 
-                # NEW FEATURE: Expiry-Based Loss Prevention (Stepwise Logic)
                 loss_discount, loss_msgs = utils.calculate_advanced_loss_prevention(st.session_state['cart'])
                 if loss_discount > 0:
                     st.warning(f"⚠️ Loss Prevention Discount: {currency}{loss_discount:.2f}")
                     for msg in loss_msgs: st.caption(f"• {msg}")
 
-                # Campaign Discount (Auto)
                 fest_disc = 0
                 fest_sales = active_campaigns[active_campaigns['type'] == 'Festival Offer']
                 if not fest_sales.empty:
-                    # Simple flat discount for demo of festival
                     fest_disc = raw_total * 0.05
                     st.caption(f"🎉 Festival Offer Applied (-{currency}{fest_disc:.2f})")
 
-                # Ensure total is not negative
                 total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'] - loss_discount)
                 
-                # Tax
                 gst_enabled = db.get_setting("gst_enabled") == 'True'
                 tax_amount = 0.0
                 if gst_enabled:
@@ -478,8 +467,8 @@ def pos_interface():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.markdown("---") # Visual separator for clear checkout action
-                c_clear, c_pay = st.columns([1, 2]) # 1:2 ratio to emphasize Pay button
+                st.markdown("---")
+                c_clear, c_pay = st.columns([1, 2])
                 
                 with c_clear:
                     if st.button("🗑️ Clear Cart", use_container_width=True):
@@ -509,7 +498,6 @@ def pos_interface():
                 st.button("Proceed to Pay", disabled=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- STATE MACHINE: PAYMENT METHOD SELECTION ---
     elif st.session_state['checkout_stage'] == 'payment_method':
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.button("⬅ Back to Cart", on_click=lambda: st.session_state.update({'checkout_stage': 'cart'}))
@@ -529,8 +517,8 @@ def pos_interface():
             if st.button("Select UPI", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'UPI'
                 st.session_state['checkout_stage'] = 'payment_process'
-                st.session_state['qr_expiry'] = None # Reset Timer
-                st.session_state.pop('upi_txn_ref', None) # Reset Ref for new txn
+                st.session_state['qr_expiry'] = None 
+                st.session_state.pop('upi_txn_ref', None) 
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c3:
@@ -542,7 +530,6 @@ def pos_interface():
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- STATE MACHINE: PAYMENT PROCESSING ---
     elif st.session_state['checkout_stage'] == 'payment_process':
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         c_back, c_title = st.columns([1, 5])
@@ -554,7 +541,6 @@ def pos_interface():
         
         st.subheader(f"Processing {mode} Payment - Amount: {currency}{total:,.2f}")
         
-        # LOGIC FOR CASH
         if mode == 'Cash':
             tendered = st.number_input("Amount Received from Customer", min_value=0.0, step=10.0)
             if tendered > 0:
@@ -569,12 +555,10 @@ def pos_interface():
             else:
                 st.info("Enter amount received to calculate change.")
 
-        # LOGIC FOR UPI
         elif mode == 'UPI':
             if st.session_state['qr_expiry'] is None:
-                st.session_state['qr_expiry'] = time.time() + 240 # 4 mins
+                st.session_state['qr_expiry'] = time.time() + 240 
             
-            # FIX 3: Generate Reference ONCE per session to stop QR flashing
             if 'upi_txn_ref' not in st.session_state:
                 st.session_state['upi_txn_ref'] = f"INV-{random.randint(1000,9999)}"
             
@@ -583,7 +567,6 @@ def pos_interface():
             c_qr, c_info = st.columns([1, 1])
             with c_qr:
                 upi_id = db.get_setting("upi_id")
-                # Use stored ref
                 txn_ref = st.session_state['upi_txn_ref']
                 qr_img = utils.generate_upi_qr(upi_id, store_name, total, txn_ref)
                 st.image(qr_img, width=250, caption=f"Scan to Pay: {currency}{total:.2f}")
@@ -612,7 +595,6 @@ def pos_interface():
                         st.session_state.pop('upi_txn_ref', None)
                         st.rerun()
 
-        # LOGIC FOR CARD
         elif mode == 'Card':
             st.info("💳 Card Payment Simulation")
             col_cc1, col_cc2 = st.columns(2)
@@ -624,11 +606,10 @@ def pos_interface():
                 cc_cvv = st.text_input("CVV", type="password", max_chars=4)
             
             if st.button("Process Transaction"):
-                # Realistic Validation
                 valid, msg = utils.validate_card(cc_num, cc_exp, cc_cvv)
                 if valid:
                     with st.spinner("Contacting Bank Gateway..."):
-                        time.sleep(2) # Artificial Delay
+                        time.sleep(2) 
                         with st.spinner("Verifying Credentials..."):
                             time.sleep(1.5)
                         st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
@@ -639,14 +620,20 @@ def pos_interface():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- STATE MACHINE: RECEIPT ---
     elif st.session_state['checkout_stage'] == 'receipt':
         st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
         st.markdown("<div class='card-container' style='text-align:center'>", unsafe_allow_html=True)
         st.title("✅ Payment Successful")
         st.caption("Transaction has been recorded.")
         
-        # FIX 5: Better Receipt Buttons
+        # FIX 9: SHOW GENERATED COUPON
+        if 'new_coupon_code' in st.session_state and st.session_state['new_coupon_code']:
+            st.markdown("---")
+            st.success("🎉 Special Gift for the Customer!")
+            st.markdown(f"**Generated Coupon:** `{st.session_state['new_coupon_code']}`")
+            st.caption("Valid for 10% OFF on next visit (30 days)")
+            st.markdown("---")
+            
         c_rec1, c_rec2 = st.columns(2)
         with c_rec1:
             if 'last_receipt' in st.session_state:
@@ -661,34 +648,29 @@ def pos_interface():
                 st.session_state['applied_coupon'] = None
                 st.session_state['points_to_redeem'] = 0
                 st.session_state.pop('upi_txn_ref', None)
+                st.session_state.pop('new_coupon_code', None) # Clear coupon
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
 def finalize_sale(total, mode):
     calc = st.session_state['final_calc']
-    
-    # Gather Data
     txn_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     operator = st.session_state['full_name']
     customer = st.session_state['current_customer']
     customer_mobile = customer['mobile'] if customer else None
     
-    # Calculate Points Earned
     points_earned = 0
     if customer:
         points_earned = utils.calculate_loyalty_points(total)
     
-    # Generate Hash
     items_json = json.dumps([i['id'] for i in st.session_state['cart']])
     integrity_hash = utils.generate_integrity_hash((txn_time, total, items_json, operator))
     
-    # Safe Coupon Retrieval
     coupon_code = None
     if st.session_state.get('applied_coupon'):
          coupon_code = st.session_state['applied_coupon']['code']
     
-    # EXECUTE ATOMIC TRANSACTION (Resolves Locking)
     try:
         sale_id = db.process_sale_transaction(
             st.session_state['cart'],
@@ -703,22 +685,25 @@ def finalize_sale(total, mode):
             calc['points'],
             points_earned,
             integrity_hash,
-            30 # Estimated Time Taken
+            30 
         )
         
         st.session_state['undo_stack'].append(sale_id)
-        # Clear Redo stack on new action
         st.session_state['redo_stack'] = []
         
-        # LOGGING (Explicitly added to ensure logs work)
         db.log_activity(operator, "Sale Completed", f"Sale #{sale_id} for {currency}{total:.2f}")
         
+        # FIX 9: GENERATE COUPON
+        if customer_mobile:
+            new_code = db.generate_auto_coupon(customer_mobile)
+            if new_code:
+                st.session_state['new_coupon_code'] = new_code
+        
         tax_info = {"tax_amount": calc['tax'], "tax_percent": 18}
-        # Updated pdf gen call
         pdf = utils.generate_receipt_pdf(store_name, sale_id, txn_time, st.session_state['cart'], total, operator, mode, st.session_state['pos_id'], customer, tax_info)
         
         st.session_state['last_receipt'] = pdf
-        st.session_state['checkout_stage'] = 'receipt' # Force state change
+        st.session_state['checkout_stage'] = 'receipt'
         st.session_state['qr_expiry'] = None
         st.rerun()
         
@@ -728,7 +713,6 @@ def finalize_sale(total, mode):
 
 def inventory_manager():
     st.title("📦 Master Inventory Management")
-    # PRESERVING ORIGINAL 6 TABS
     tab_view, tab_add, tab_restock, tab_reqs, tab_metrics, tab_abc = st.tabs(["View & Edit", "Add New Product", "➕ Restock (Manual/QR)", "📋 Stock Requests", "Stock Metrics", "ABC Analysis"])
     
     conn = db.get_connection()
@@ -745,7 +729,6 @@ def inventory_manager():
         if cat_filter != "All": df_filtered = df[df['category'] == cat_filter]
         if search_txt: df_filtered = df_filtered[df_filtered['name'].str.contains(search_txt, case=False)]
         
-        # Dead Stock Flag in View
         st.dataframe(df_filtered[['id', 'name', 'category', 'price', 'stock', 'expiry_date', 'is_dead_stock']], use_container_width=True)
         
         col_dead_1, col_dead_2 = st.columns(2)
@@ -761,10 +744,12 @@ def inventory_manager():
                 st.rerun()
         
         with col_dead_2:
-            st.markdown("##### 🖨️ Bulk QR Label Printing (New)")
+            st.markdown("##### 🖨️ Bulk QR Label Printing")
+            # FIX 6: Robust PDF Generation Call
             if st.button("Generate QR Labels PDF (All Items)"):
                 try:
-                    pdf_bytes = utils.generate_qr_labels_pdf(df_filtered.to_dict('records'))
+                    with st.spinner("Generating QR Codes..."):
+                        pdf_bytes = utils.generate_qr_labels_pdf(df_filtered.to_dict('records'))
                     st.download_button("⬇️ Download Labels PDF", pdf_bytes, "qr_labels.pdf", "application/pdf")
                     st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                 except Exception as e:
@@ -784,18 +769,13 @@ def inventory_manager():
 
     with tab_add:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        # Fix 3: Added clear_on_submit=True to reset form after save
         with st.form("new_prod", clear_on_submit=True):
             n = st.text_input("Product Name")
             c = st.selectbox("Category", db.get_categories_list())
             p = st.number_input("Selling Price", min_value=0.0)
             cp = st.number_input("Cost Price", min_value=0.0)
             s = st.number_input("Initial Stock", min_value=0)
-            
-            # Feature 4: Product Image Upload
             img_file = st.file_uploader("Product Image (Optional)", type=['png', 'jpg', 'jpeg'])
-            
-            # New Expiry Logic
             has_expiry = st.radio("Does this product have an expiry date?", ["Yes", "No"], index=0, horizontal=True)
             exp = None
             if has_expiry == "Yes":
@@ -808,7 +788,6 @@ def inventory_manager():
                 if db.add_product(n, c, p, s, cp, exp, img_bytes):
                     st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                     st.success(f"Product information stored successfully: {n}")
-                    # No rerun needed as clear_on_submit handles input reset
                 else: 
                     st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                     st.error("Error adding product")
@@ -875,38 +854,41 @@ def inventory_manager():
 def analytics_dashboard():
     st.title("📈 Enterprise Analytics")
     df_sales = db.get_sales_data()
+    
+    # FIX 3: Filter out cancelled transactions for charts
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
     conn = db.get_connection()
     df_prods = pd.read_sql("SELECT * FROM products", conn)
     conn.close()
     
     try:
-        df_sales['date'] = pd.to_datetime(df_sales['timestamp'], format='mixed', dayfirst=False, errors='coerce')
-        df_sales = df_sales.dropna(subset=['date'])
+        active_sales['date'] = pd.to_datetime(active_sales['timestamp'], format='mixed', dayfirst=False, errors='coerce')
+        active_sales = active_sales.dropna(subset=['date'])
     except:
         st.error("Date parsing failed. Check DB format.")
         return
-    total_rev = df_sales['total_amount'].sum()
-    total_txns = len(df_sales)
+    total_rev = active_sales['total_amount'].sum()
+    total_txns = len(active_sales)
     
-    # UI/UX ADDITION: Styled KPI Cards
     m1, m2, m3 = st.columns(3)
     with m1: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Total Revenue</div><div class='kpi-value'>{currency}{total_rev:,.0f}</div></div>", unsafe_allow_html=True)
-    with m2: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Transactions</div><div class='kpi-value'>{total_txns}</div></div>", unsafe_allow_html=True)
-    with m3: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Avg Order Value</div><div class='kpi-value'>{currency}{total_rev/total_txns:.0f}</div></div>", unsafe_allow_html=True)
+    with m2: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Active Sales</div><div class='kpi-value'>{total_txns}</div></div>", unsafe_allow_html=True)
+    val = total_rev/total_txns if total_txns > 0 else 0
+    with m3: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Avg Order Value</div><div class='kpi-value'>{currency}{val:.0f}</div></div>", unsafe_allow_html=True)
 
-    # UPDATED ANALYTICS TABS (8 TABS NOW)
     t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
         "💰 Financials & P&L", "⚠️ Risk & Loss Prevention", "Sales Trends", "Staff Performance", 
         "Demand Forecast", "Algorithm Showcase", "🏆 Rankings", "📊 Category Analysis"
     ])
     
-    # --- NEW: PROFIT & LOSS TAB ---
     with t1:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("💰 Profit & Loss Statement")
-        pl_summary, pl_df = utils.calculate_profit_loss(df_sales, df_prods)
-        
-        # Financial Ratios
+        pl_summary, pl_df = utils.calculate_profit_loss(df_sales, df_prods) # Function handles filtering
         ratios = utils.calculate_financial_ratios(df_sales, df_prods)
         
         c_pl1, c_pl2, c_pl3, c_pl4 = st.columns(4)
@@ -919,15 +901,12 @@ def analytics_dashboard():
         if not pl_df.empty:
             st.bar_chart(pl_df.set_index('Category')['Profit'])
             st.dataframe(pl_df.style.format({"Revenue": "{:,.2f}", "Cost": "{:,.2f}", "Profit": "{:,.2f}", "Margin %": "{:.1f}%"}), use_container_width=True)
-            
-            # FIX 8: New Profit vs Loss Bar Chart
             st.markdown("#### 💹 Profit vs Revenue")
             st.bar_chart(pl_df.set_index('Category')[['Revenue', 'Profit']])
         else:
             st.info("No data available")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- NEW: RISK & LOSS PREVENTION TAB ---
     with t2:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("⚠️ Inventory Risk Assessment")
@@ -954,22 +933,19 @@ def analytics_dashboard():
             **For Near-Expiry Products:**
             1. Apply **30-50% Discount** immediately.
             2. Bundle with High-Selling items.
-            3. Aim to recover **Cost Price** (Zero Profit > Total Loss).
+            3. Aim to recover **Cost Price**.
             
             **For Dead Stock:**
             1. Return to vendor if possible.
             2. Liquidation Sale (Buy 1 Get 1).
             """)
-            
         st.markdown("</div>", unsafe_allow_html=True)
 
     with t3:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        # FIX 8: Enhanced Charts
         c_trend1, c_trend2 = st.columns(2)
         
-        # Daily Trend
-        daily = df_sales.groupby(df_sales['date'].dt.date)['total_amount'].sum().reset_index()
+        daily = active_sales.groupby(active_sales['date'].dt.date)['total_amount'].sum().reset_index()
         trend_dir = utils.analyze_trend_slope(daily['total_amount'].values)
         st.info(f"Market Trend (Algo #32): {trend_dir}")
         
@@ -978,23 +954,22 @@ def analytics_dashboard():
             st.line_chart(daily.set_index('date')['total_amount'])
             
         with c_trend2:
-            st.markdown("#### 💳 Payment Method Usage (Pie)")
-            pay_dist = df_sales['payment_mode'].value_counts()
+            st.markdown("#### 💳 Payment Method Usage")
+            pay_dist = active_sales['payment_mode'].value_counts()
             fig, ax = plt.subplots()
             ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%', startangle=90, colors=['#6366f1', '#10b981', '#f59e0b'])
             ax.axis('equal') 
             st.pyplot(fig)
             
-        # Monthly Trend
         st.markdown("#### 📆 Monthly Sales Trend")
-        df_sales['month'] = df_sales['date'].dt.to_period('M').astype(str)
-        monthly = df_sales.groupby('month')['total_amount'].sum()
+        active_sales['month'] = active_sales['date'].dt.to_period('M').astype(str)
+        monthly = active_sales.groupby('month')['total_amount'].sum()
         st.bar_chart(monthly)
 
         st.markdown("</div>", unsafe_allow_html=True)
     with t4:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        staff_stats = df_sales.groupby('operator').agg({'total_amount':'sum', 'id':'count', 'time_taken': 'mean'}).reset_index()
+        staff_stats = active_sales.groupby('operator').agg({'total_amount':'sum', 'id':'count', 'time_taken': 'mean'}).reset_index()
         staff_stats.columns = ['Name', 'Revenue', 'Sales Count', 'Avg Time (s)']
         staff_stats['Performance Score'] = (staff_stats['Revenue'] * 0.01) + (staff_stats['Sales Count'] * 10) - (staff_stats['Avg Time (s)'] * 0.5)
         staff_stats = staff_stats.sort_values('Performance Score', ascending=False)
@@ -1002,8 +977,8 @@ def analytics_dashboard():
         st.markdown("</div>", unsafe_allow_html=True)
     with t5:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if not df_sales.empty:
-            daily = df_sales.groupby(df_sales['date'].dt.date)['total_amount'].sum().reset_index()
+        if not active_sales.empty:
+            daily = active_sales.groupby(active_sales['date'].dt.date)['total_amount'].sum().reset_index()
             daily_vals = daily['total_amount'].values
             prediction = utils.forecast_next_period(daily_vals)
             c1, c2 = st.columns(2)
@@ -1054,11 +1029,11 @@ def analytics_dashboard():
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### 🏆 Best POS Operators")
-            staff_rank = df_sales.groupby('operator')['total_amount'].sum().reset_index().sort_values('total_amount', ascending=False)
+            staff_rank = active_sales.groupby('operator')['total_amount'].sum().reset_index().sort_values('total_amount', ascending=False)
             st.dataframe(staff_rank.style.highlight_max(axis=0), use_container_width=True)
         with c2:
             st.markdown("#### ⚡ Fastest Checkouts")
-            fast_op = df_sales.groupby('operator')['time_taken'].mean().reset_index().sort_values('time_taken')
+            fast_op = active_sales.groupby('operator')['time_taken'].mean().reset_index().sort_values('time_taken')
             st.dataframe(fast_op, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
     with t8:
@@ -1068,9 +1043,21 @@ def analytics_dashboard():
         if not cat_perf.empty:
             c1, c2 = st.columns([2, 1])
             with c1:
-                # FIX 8: Pie Chart for Category Distribution
-                fig, ax = plt.subplots()
-                ax.pie(cat_perf['Revenue'], labels=cat_perf['Category'], autopct='%1.1f%%', startangle=90)
+                # FIX 2: Pie Chart Improvements
+                fig, ax = plt.subplots(figsize=(6, 6))
+                
+                wedges, texts, autotexts = ax.pie(
+                    cat_perf['Revenue'], 
+                    labels=cat_perf['Category'], 
+                    autopct='%1.1f%%', 
+                    startangle=90, 
+                    pctdistance=0.85,
+                    wedgeprops=dict(width=0.4, edgecolor='w') 
+                )
+                
+                plt.setp(texts, size=9)
+                plt.setp(autotexts, size=8, weight="bold", color="white")
+                ax.legend(wedges, cat_perf['Category'], title="Categories", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
                 ax.axis('equal')
                 st.pyplot(fig)
             with c2:
@@ -1081,7 +1068,6 @@ def analytics_dashboard():
 
 def admin_panel():
     st.title("🛡️ Admin Console")
-    # PRESERVING ALL 10 ADMIN TABS
     tab_dash, tab_cats, tab_settings, tab_cust, tab_term, tab_users, tab_req_app, tab_market, tab_txns, tab_logs = st.tabs(["Controls", "Category", "⚙️ Settings", "👥 Customers", "🖥️ Terminals", "👤 Users", "📝 Stock Reqs", "🚀 Marketing", "📜 Transactions", "📝 Logs"])
     
     with tab_dash:
@@ -1091,23 +1077,27 @@ def admin_panel():
             st.success("All session locks cleared.")
         st.markdown("---")
         
-        # ISSUE 5 FIX: UNDO/REDO TRANSACTION
+        # FIX 7: UI for Cancellation Reason
         c_undo, c_redo = st.columns(2)
         with c_undo:
             if st.session_state['undo_stack']:
                 last_sale_id = st.session_state['undo_stack'][-1]
                 st.warning(f"Ready to undo Sale ID: #{last_sale_id}")
+                
+                reason = st.text_input("Cancellation Reason", key="cancel_reason")
                 if st.button("↩️ Undo Last Sale"):
-                    success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'])
-                    if success:
-                        st.session_state['redo_stack'].append(st.session_state['undo_stack'].pop())
-                        db.log_activity(st.session_state['user'], "Undo", f"Cancelled sale #{last_sale_id}")
-                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
-                        st.success(f"Order #{last_sale_id} cancelled successfully.")
-                        time.sleep(1)
-                        st.rerun()
+                    if not reason:
+                        st.error("Reason Required")
                     else:
-                        st.error(f"Failed: {msg}")
+                        success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'], st.session_state['role'], reason)
+                        if success:
+                            st.session_state['redo_stack'].append(st.session_state['undo_stack'].pop())
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                            st.success(f"Order #{last_sale_id} cancelled successfully.")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"Failed: {msg}")
             else: st.info("No recent transactions to undo.")
         
         with c_redo:
@@ -1118,7 +1108,6 @@ def admin_panel():
                     success, msg = db.redo_sale_transaction(last_undo_id, st.session_state['user'])
                     if success:
                         st.session_state['undo_stack'].append(st.session_state['redo_stack'].pop())
-                        db.log_activity(st.session_state['user'], "Redo", f"Restored sale #{last_undo_id}")
                         st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                         st.success(f"Order #{last_undo_id} restored.")
                         time.sleep(1)
@@ -1128,7 +1117,7 @@ def admin_panel():
             else: st.info("No actions to redo.")
 
         st.markdown("---")
-        if st.button("Create System Backup (Algo #28)"):
+        if st.button("Create System Backup"):
             path = utils.backup_system()
             if path: st.success(f"Backup: {path}")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1141,7 +1130,6 @@ def admin_panel():
             else: st.error("Failed")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- ISSUE 1 FIX: ROLE-BASED ACCESS CONTROL (MANAGER) ---
     with tab_settings:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         if st.session_state['role'] != 'Admin':
@@ -1179,7 +1167,6 @@ def admin_panel():
             c2.metric("Total Customer Spend", f"{currency}{cust_df['total_spend'].sum():,.2f}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- ISSUE 1 FIX: ROLE-BASED ACCESS CONTROL (MANAGER) ---
     with tab_term:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         if st.session_state['role'] != 'Admin':
@@ -1206,14 +1193,12 @@ def admin_panel():
                         st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # --- ISSUE 1 FIX: ROLE-BASED ACCESS CONTROL (MANAGER) ---
     with tab_users:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         if st.session_state['role'] != 'Admin':
              st.error("⛔ Access Denied. Administrator privileges required.")
         else:
             with st.expander("Create New User"):
-                # FIX: Added clear_on_submit=True to flush the form
                 with st.form("new_user_form", clear_on_submit=True):
                     nu_user = st.text_input("Username")
                     nu_pass = st.text_input("Password", type="password")
@@ -1225,14 +1210,13 @@ def admin_panel():
                             st.success(f"User '{nu_user}' created successfully")
                         else: st.error("Error creating user")
             
-            st.subheader("Manage User Status (Feature #1)")
+            st.subheader("Manage User Status")
             users = db.get_all_users()
             for _, u in users.iterrows():
                 with st.container():
                     c1, c2 = st.columns([4, 1])
                     c1.write(f"**{u['username']}** ({u['role']}) - {u['status']}")
                     
-                    # Prevent disabling self
                     if u['username'] != st.session_state['user']:
                         new_stat = c2.selectbox("Status", ["Active", "Disabled"], index=0 if u['status'] == 'Active' else 1, key=f"u_stat_{u['username']}")
                         if new_stat != u['status']:
@@ -1265,7 +1249,6 @@ def admin_panel():
         st.subheader("🚀 Retail Marketing Hub")
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         
-        # FEATURE 2: CREATE COUPON
         with st.expander("🎟️ Create Discount Coupon"):
             with st.form("new_coupon"):
                 cc_code = st.text_input("Coupon Code (e.g., SUMMER10)")
@@ -1285,7 +1268,6 @@ def admin_panel():
         st.markdown("</div>", unsafe_allow_html=True)
         
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        # FEATURE 4: LUCKY DRAW
         st.subheader("🎲 Lucky Draw System")
         c1, c2 = st.columns(2)
         with c1:
@@ -1308,8 +1290,7 @@ def admin_panel():
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        # FEATURE 3 & 8: CAMPAIGNS
-        st.subheader("📢 Campaigns (Flash Sale / Festival)")
+        st.subheader("📢 Campaigns")
         with st.form("new_campaign"):
             cp_name = st.text_input("Campaign Name (e.g., Midnight Flash Sale)")
             cp_type = st.selectbox("Type", ["Flash Sale", "Festival Offer"])
@@ -1324,7 +1305,9 @@ def admin_panel():
 
     with tab_txns:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("📜 Transaction History (Feature #4)")
+        # FIX 5: Transaction Traceability
+        st.subheader("📜 Order & Payment Details")
+        
         with st.expander("🔍 Search & Filters"):
             col_t1, col_t2, col_t3 = st.columns(3)
             f_bill = col_t1.number_input("Search Bill ID", min_value=0, value=0)
@@ -1338,16 +1321,40 @@ def admin_panel():
         
         txns = db.get_transaction_history(filters)
         if not txns.empty:
-            st.dataframe(txns, use_container_width=True)
+            # Reorder for traceability
+            st.dataframe(
+                txns[['id', 'timestamp', 'total_amount', 'status', 'payment_mode', 'operator', 'pos_id', 'customer_mobile', 'integrity_hash']], 
+                use_container_width=True
+            )
         else:
             st.info("No transactions found.")
         st.markdown("</div>", unsafe_allow_html=True)
         
     with tab_logs:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("📝 System Audit Logs (Feature #5)")
+        # FIX 4: Logs View Control
+        st.subheader("📝 System Audit Logs")
+        
         logs = db.get_full_logs()
-        st.dataframe(logs, use_container_width=True)
+        
+        if st.session_state['role'] == 'Operator':
+            st.warning("Restricted View: General logs only.")
+        
+        # Cancelled Orders Log Section
+        if st.session_state['role'] in ['Admin', 'Manager']:
+            st.markdown("#### 🚫 Cancelled Orders Audit")
+            cancel_logs = logs[logs['action'] == 'Undo Sale']
+            if not cancel_logs.empty:
+                st.dataframe(cancel_logs, use_container_width=True)
+            else:
+                st.info("No cancellation events recorded.")
+            
+            st.markdown("#### All Logs")
+            st.dataframe(logs, use_container_width=True)
+        else:
+            # Simple logs for operator
+            st.dataframe(logs[logs['action'] != 'Undo Sale'], use_container_width=True)
+            
         st.markdown("</div>", unsafe_allow_html=True)
 
 def user_profile_page():
@@ -1379,7 +1386,6 @@ def main():
         login_view()
     else:
         with st.sidebar:
-            # UI/UX ADDITION: Styled User Info
             st.markdown(f"""
             <div style="padding: 15px; background: rgba(255,255,255,0.05); border-radius: 12px; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.1);">
                 <div style="font-size: 0.8rem; opacity: 0.7; letter-spacing: 1px;">CURRENT USER</div>
@@ -1388,10 +1394,8 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
-            # Theme Toggle
             c_theme, c_lbl = st.columns([1, 4])
             with c_theme:
-                # Cycle themes: dark -> light -> adaptive -> dark
                 current = st.session_state['theme']
                 if st.button("🎨", help="Switch Theme"):
                     if current == 'dark': st.session_state['theme'] = 'light'
@@ -1402,7 +1406,6 @@ def main():
 
             st.markdown("---")
             
-            # Navigation
             role = st.session_state['role']
             nav_opts = ["POS Terminal", "My Profile"]
             if role in ["Admin", "Manager"]: nav_opts = ["POS Terminal", "Inventory", "Analytics", "Admin Panel", "My Profile"]
