@@ -1,8 +1,3 @@
-Here’s a **clean, professional, GitHub-ready project description** you can directly paste into your **README.md**.
-It’s written to sound **serious, academic, and impressive**, without over-claiming.
-
----
-
 # 📦 Inventory Management System with Sales & Performance Analysis Using Python
 
 ## 📌 Project Overview
