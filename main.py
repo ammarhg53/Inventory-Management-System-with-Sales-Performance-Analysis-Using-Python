@@ -723,6 +723,7 @@ def inventory_manager():
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.markdown("### Product Database")
         col_f1, col_f2 = st.columns(2)
+        # FIX 3: get_categories_list used here (provided by db module)
         cat_filter = col_f1.selectbox("Filter Category", ["All"] + db.get_categories_list())
         search_txt = col_f2.text_input("Search Name")
         df_filtered = df
@@ -836,6 +837,21 @@ def inventory_manager():
                 else: st.error("Invalid Product ID")
         st.divider()
         st.dataframe(db.get_stock_requests(), use_container_width=True)
+        
+        # Admin Action for Requests
+        reqs = db.get_stock_requests()
+        pending = reqs[reqs['status'] == 'Pending']
+        if not pending.empty and st.session_state['role'] in ['Admin', 'Inventory Manager']:
+             st.markdown("#### Pending Actions")
+             for _, r in pending.iterrows():
+                with st.expander(f"REQ #{r['id']}: {r['product_name']} ({r['quantity']})"):
+                    st.write(f"**User:** {r['requested_by']} | **Note:** {r['notes']}")
+                    c1, c2 = st.columns(2)
+                    if c1.button("✅ Approve", key=f"app_{r['id']}"):
+                         db.update_request_status(r['id'], "Approved"); st.rerun()
+                    if c2.button("❌ Reject", key=f"rej_{r['id']}"):
+                         db.update_request_status(r['id'], "Rejected"); st.rerun()
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_metrics:
@@ -1072,9 +1088,18 @@ def admin_panel():
     
     with tab_dash:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if st.button("🔓 Force Unlock All Terminals"):
-            db.force_clear_all_sessions()
-            st.success("All session locks cleared.")
+        c_live, c_unlock = st.columns(2)
+        with c_live:
+            # POINT 5: REAL-TIME SIMULATION
+            live_mode = st.checkbox("🔄 Enable Live Dashboard (Auto-Refresh 10s)")
+            if live_mode:
+                time.sleep(10)
+                st.rerun()
+        with c_unlock:
+            if st.button("🔓 Force Unlock All Terminals"):
+                db.force_clear_all_sessions()
+                st.success("All session locks cleared.")
+        
         st.markdown("---")
         
         # FIX 7: UI for Cancellation Reason
@@ -1181,10 +1206,25 @@ def admin_panel():
                         if db.add_terminal(nt_id, nt_name, nt_loc): st.success("Terminal Added"); st.rerun()
                         else: st.error("Error creating terminal")
             terms = db.get_all_terminals()
+            
+            # POINT 4: MULTI-POS TERMINAL STATS
+            stats_df = db.get_terminal_stats()
+            
             for _, t in terms.iterrows():
                 with st.container():
                     c1, c2, c3 = st.columns([3, 1, 1])
+                    
+                    # Match stats
+                    t_stat = stats_df[stats_df['pos_id'] == t['id']]
+                    rev = 0
+                    cnt = 0
+                    if not t_stat.empty:
+                        rev = t_stat.iloc[0]['total_revenue']
+                        cnt = t_stat.iloc[0]['order_count']
+                    
                     c1.write(f"**{t['name']}** ({t['id']}) - {t['location']}")
+                    c1.caption(f"Orders: {cnt} | Revenue: {currency}{rev:,.2f}")
+                    
                     new_status = c2.selectbox("Status", ["Active", "Maintenance", "Error"], index=["Active", "Maintenance", "Error"].index(t['status']), key=f"status_{t['id']}")
                     if new_status != t['status']:
                         db.update_terminal_status(t['id'], new_status)
@@ -1231,17 +1271,17 @@ def admin_panel():
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         reqs = db.get_stock_requests()
         pending = reqs[reqs['status'] == 'Pending']
-        if not pending.empty:
-            for _, r in pending.iterrows():
-                with st.expander(f"{r['product_name']} - Qty: {r['quantity']}"):
-                    st.write(f"**Requested By:** {r['requested_by']}")
-                    st.write(f"**Notes:** {r['notes']}")
+        if not pending.empty and st.session_state['role'] in ['Admin', 'Inventory Manager']:
+             st.markdown("#### Pending Actions")
+             for _, r in pending.iterrows():
+                with st.expander(f"REQ #{r['id']}: {r['product_name']} ({r['quantity']})"):
+                    st.write(f"**User:** {r['requested_by']} | **Note:** {r['notes']}")
                     c1, c2 = st.columns(2)
                     if c1.button("✅ Approve", key=f"app_{r['id']}"):
-                        db.update_request_status(r['id'], "Approved"); st.success("Approved"); st.rerun()
+                         db.update_request_status(r['id'], "Approved"); st.rerun()
                     if c2.button("❌ Reject", key=f"rej_{r['id']}"):
-                        db.update_request_status(r['id'], "Rejected"); st.error("Rejected"); st.rerun()
-        else: st.info("No Pending Requests")
+                         db.update_request_status(r['id'], "Rejected"); st.rerun()
+
         st.dataframe(reqs, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1321,7 +1361,6 @@ def admin_panel():
         
         txns = db.get_transaction_history(filters)
         if not txns.empty:
-            # Reorder for traceability
             st.dataframe(
                 txns[['id', 'timestamp', 'total_amount', 'status', 'payment_mode', 'operator', 'pos_id', 'customer_mobile', 'integrity_hash']], 
                 use_container_width=True
@@ -1337,10 +1376,11 @@ def admin_panel():
         
         logs = db.get_full_logs()
         
+        # Access Control for Logs
         if st.session_state['role'] == 'Operator':
             st.warning("Restricted View: General logs only.")
         
-        # Cancelled Orders Log Section
+        # Cancellation Log Section - Visible to Admin/Manager
         if st.session_state['role'] in ['Admin', 'Manager']:
             st.markdown("#### 🚫 Cancelled Orders Audit")
             cancel_logs = logs[logs['action'] == 'Undo Sale']
@@ -1349,11 +1389,14 @@ def admin_panel():
             else:
                 st.info("No cancellation events recorded.")
             
-            st.markdown("#### All Logs")
+            st.markdown("---")
+            st.markdown("#### All System Logs")
             st.dataframe(logs, use_container_width=True)
         else:
-            # Simple logs for operator
-            st.dataframe(logs[logs['action'] != 'Undo Sale'], use_container_width=True)
+            # Operator view: Filter out cancellation details if sensitive, or just show general
+            st.markdown("#### My Activity")
+            op_logs = logs[logs['action'] != 'Undo Sale']
+            st.dataframe(op_logs, use_container_width=True)
             
         st.markdown("</div>", unsafe_allow_html=True)
 
