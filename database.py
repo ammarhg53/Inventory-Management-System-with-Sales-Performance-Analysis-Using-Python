@@ -29,7 +29,8 @@ def init_db():
                   sales_count INTEGER DEFAULT 0,
                   last_restock_date TEXT,
                   expiry_date TEXT,
-                  is_dead_stock TEXT DEFAULT 'False')''')
+                  is_dead_stock TEXT DEFAULT 'False',
+                  image_data BLOB)''')
     
     # Updated Sales table for Coupons/Points
     c.execute('''CREATE TABLE IF NOT EXISTS sales
@@ -154,6 +155,9 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE products ADD COLUMN is_dead_stock TEXT DEFAULT 'False'")
     except: pass
+    # Visuals Migration
+    try: c.execute("ALTER TABLE products ADD COLUMN image_data BLOB")
+    except: pass
 
     # --- CLEANUP ON RESTART ---
     c.execute("DELETE FROM active_sessions")
@@ -271,6 +275,7 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
 
         # 4. Update Customer Stats
         if customer_mobile:
+            customer_mobile = customer_mobile.strip()
             # Fetch current data first inside this transaction
             c.execute("SELECT total_spend, loyalty_points FROM customers WHERE mobile=?", (customer_mobile,))
             res = c.fetchone()
@@ -302,7 +307,7 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
 def get_customer(mobile):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM customers WHERE mobile=?", (mobile,))
+    c.execute("SELECT * FROM customers WHERE mobile=?", (mobile.strip(),))
     row = c.fetchone()
     conn.close()
     if row:
@@ -313,6 +318,7 @@ def get_customer(mobile):
     return None
 
 def upsert_customer(mobile, name, email):
+    mobile = mobile.strip()
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT visits FROM customers WHERE mobile=?", (mobile,))
@@ -552,7 +558,7 @@ def update_request_status(req_id, status):
 
 # --- PRODUCT MANAGEMENT (CRUD) ---
 
-def add_product(name, category, price, stock, cost_price, expiry_date=None):
+def add_product(name, category, price, stock, cost_price, expiry_date=None, image_data=None):
     conn = get_connection()
     c = conn.cursor()
     
@@ -566,11 +572,15 @@ def add_product(name, category, price, stock, cost_price, expiry_date=None):
         expiry_str = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
 
     try:
-        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, is_dead_stock) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'False')",
-                  (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d"), expiry_str))
+        # Ensure image_data is bytes or None
+        img_blob = sqlite3.Binary(image_data) if image_data else None
+        
+        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, is_dead_stock, image_data) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'False', ?)",
+                  (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d"), expiry_str, img_blob))
         conn.commit()
         return True
     except Exception as e:
+        print(e)
         return False
     finally:
         conn.close()
@@ -601,6 +611,7 @@ def toggle_dead_stock(p_id, is_dead):
 
 def get_all_products():
     conn = get_connection()
+    # Need to select image_data as well if used in views, usually safer to select *
     df = pd.read_sql("SELECT * FROM products", conn)
     conn.close()
     return df
@@ -613,8 +624,11 @@ def get_product_by_id(p_id):
     conn.close()
     if row:
         # Adjusted schema index for new columns
-        # id, name, category, price, stock, cost_price, sales_count, last_restock_date, expiry, dead_stock
-        return {"id": row[0], "name": row[1], "category": row[2], "price": row[3], "stock": row[4]}
+        # id, name, category, price, stock, cost_price, sales_count, last_restock_date, expiry, dead_stock, image
+        # Using dict for safety as columns might shift
+        col_names = [description[0] for description in c.description]
+        data = dict(zip(col_names, row))
+        return data
     return None
 
 def restock_product(p_id, quantity):
