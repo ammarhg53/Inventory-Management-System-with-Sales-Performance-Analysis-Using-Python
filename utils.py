@@ -12,8 +12,7 @@ from datetime import datetime, timedelta
 import shutil
 import os
 import json
-from PIL import Image, ImageTk
-import tkinter as tk
+from PIL import Image
 import cv2
 
 # Import pyzbar for QR decoding (Fix #2)
@@ -21,6 +20,16 @@ try:
     from pyzbar.pyzbar import decode as qr_decode
 except ImportError:
     qr_decode = None
+
+# --- CONDITIONAL IMPORT FOR TKINTER (CLOUD COMPATIBILITY) ---
+# Streamlit Cloud (Linux) usually lacks Tk libraries.
+# We catch the import error to prevent app crash on startup.
+try:
+    import tkinter as tk
+    from PIL import ImageTk
+except (ImportError, OSError):
+    tk = None
+    ImageTk = None
 
 # --- REAL-TIME LIVE SCANNER (NEW FEATURE) ---
 class LiveBarcodeScanner:
@@ -36,6 +45,9 @@ class LiveBarcodeScanner:
         Scans for barcodes/QRs in real-time.
         Auto-closes upon detection.
         """
+        if tk is None:
+            return None
+
         # Initialize Camera
         self.cap = cv2.VideoCapture(0)
         
@@ -94,9 +106,11 @@ class LiveBarcodeScanner:
             # Convert to Tkinter Image
             cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
             img = Image.fromarray(cv2image)
-            imgtk = ImageTk.PhotoImage(image=img)
-            self.panel.imgtk = imgtk
-            self.panel.config(image=imgtk)
+            # Safe access to ImageTk (guarded by init check via main wrapper)
+            if ImageTk:
+                imgtk = ImageTk.PhotoImage(image=img)
+                self.panel.imgtk = imgtk
+                self.panel.config(image=imgtk)
             
             # Loop
             self.root.after(10, self.video_loop)
@@ -113,6 +127,10 @@ def run_live_scan():
     """Wrapper function to invoke the scanner safely."""
     if qr_decode is None:
         return None, "Error: pyzbar library not installed."
+    
+    # CLOUD SAFETY CHECK
+    if tk is None:
+        return None, "⚠️ Live camera scanning is disabled in Cloud Runtime (Tkinter missing). Use manual entry."
     
     scanner = LiveBarcodeScanner()
     try:
