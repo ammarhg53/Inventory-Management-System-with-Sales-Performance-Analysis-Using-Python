@@ -6,6 +6,21 @@ import hashlib
 import json
 import os
 
+# --- POINT 6: FREE DATABASE CONNECTION GUIDANCE ---
+# This system uses SQLite (inventory_system.db) by default.
+# SQLite is a serverless, file-based database engine that is:
+# 1. FREE and requires no setup.
+# 2. Native to Python (no pip install needed).
+# 3. Thread-safe for local development and demos.
+#
+# For Multi-Terminal / Multi-POS Simulation:
+# - SQLite handles concurrent read/writes using file locking.
+# - To simulate multiple POS terminals, open the app in multiple browser tabs/windows.
+# - Each tab acts as a separate "Terminal" session sharing this DB.
+#
+# For Production Deployment:
+# - Replace get_connection() to return a psycopg2 connection (PostgreSQL).
+# - Example: return psycopg2.connect(os.environ["DATABASE_URL"])
 DB_NAME = "inventory_system.db"
 
 def get_connection():
@@ -287,6 +302,7 @@ def cancel_sale_transaction(sale_id, operator, role, reason):
     - Checks role permissions
     - Requires reason
     - Updates cancelled_by and cancellation_reason
+    - Restores Inventory
     """
     conn = get_connection()
     c = conn.cursor()
@@ -852,3 +868,42 @@ def get_category_performance():
         except: continue
         
     return pd.DataFrame(list(cat_sales.items()), columns=['Category', 'Revenue']).sort_values('Revenue', ascending=False)
+
+# --- FIX 3: CATEGORY & TERMINAL METHODS ---
+def get_categories_list():
+    """Fetches distinct categories for UI filters."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT name FROM categories")
+    cats = [row[0] for row in c.fetchall()]
+    conn.close()
+    return cats
+
+def add_category(name):
+    """Adds a new category."""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        conn.close()
+
+def get_terminal_stats():
+    """Calculates active orders and revenue per POS terminal."""
+    conn = get_connection()
+    df = pd.read_sql("""
+        SELECT 
+            pos_id, 
+            COUNT(*) as order_count, 
+            SUM(total_amount) as total_revenue,
+            MAX(timestamp) as last_active
+        FROM sales 
+        WHERE status != 'Cancelled'
+        GROUP BY pos_id
+    """, conn)
+    conn.close()
+    return df
