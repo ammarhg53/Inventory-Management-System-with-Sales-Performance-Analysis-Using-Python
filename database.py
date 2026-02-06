@@ -10,7 +10,6 @@ DB_NAME = "inventory_system.db"
 
 def get_connection():
     """Returns a connection to the SQLite database."""
-    # Added timeout to wait for locks to clear if necessary
     return sqlite3.connect(DB_NAME, check_same_thread=False, timeout=30)
 
 def init_db():
@@ -18,7 +17,6 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
     
-    # --- TABLE DEFINITIONS ---
     c.execute('''CREATE TABLE IF NOT EXISTS products
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   name TEXT NOT NULL, 
@@ -32,7 +30,7 @@ def init_db():
                   is_dead_stock TEXT DEFAULT 'False',
                   image_data BLOB)''')
     
-    # Updated Sales table for Coupons/Points
+    # FIX 4 & 7: Added cancellation_reason and cancelled_by
     c.execute('''CREATE TABLE IF NOT EXISTS sales
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, 
@@ -48,7 +46,9 @@ def init_db():
                   tax_amount REAL DEFAULT 0.0,
                   discount_amount REAL DEFAULT 0.0,
                   coupon_applied TEXT,
-                  points_redeemed INTEGER DEFAULT 0)''')
+                  points_redeemed INTEGER DEFAULT 0,
+                  cancellation_reason TEXT,
+                  cancelled_by TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings
                  (key TEXT PRIMARY KEY, value TEXT)''')
@@ -56,7 +56,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS categories
                  (name TEXT PRIMARY KEY)''')
 
-    # Updated Users table for Status
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (username TEXT PRIMARY KEY, 
                   password_hash TEXT, 
@@ -68,11 +67,9 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, 
                   user TEXT, action TEXT, details TEXT)''')
                   
-    # Active Sessions for Concurrency Control
     c.execute('''CREATE TABLE IF NOT EXISTS active_sessions
                  (pos_id TEXT PRIMARY KEY, username TEXT, login_time TEXT, role TEXT)''')
 
-    # Updated Customers table for Loyalty
     c.execute('''CREATE TABLE IF NOT EXISTS customers
                  (mobile TEXT PRIMARY KEY, 
                   name TEXT, 
@@ -98,7 +95,6 @@ def init_db():
                   requested_by TEXT, 
                   timestamp TEXT)''')
 
-    # FEATURE 2: COUPONS
     c.execute('''CREATE TABLE IF NOT EXISTS coupons
                  (code TEXT PRIMARY KEY, 
                   discount_type TEXT, 
@@ -108,7 +104,6 @@ def init_db():
                   usage_limit INTEGER, 
                   used_count INTEGER DEFAULT 0)''')
 
-    # FEATURE 3 & 8: MARKETING CAMPAIGNS (Festival/Flash)
     c.execute('''CREATE TABLE IF NOT EXISTS campaigns
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   name TEXT, 
@@ -118,7 +113,6 @@ def init_db():
                   config_json TEXT,
                   is_active TEXT DEFAULT 'True')''')
     
-    # FEATURE 4: LUCKY DRAWS
     c.execute('''CREATE TABLE IF NOT EXISTS lucky_draws
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   draw_date TEXT, 
@@ -128,7 +122,6 @@ def init_db():
                   criteria TEXT)''')
 
     # --- MIGRATIONS ---
-    # Ensure all columns exist (for updates on existing DB files)
     try: c.execute("ALTER TABLE products ADD COLUMN last_restock_date TEXT")
     except: pass
     try: c.execute("ALTER TABLE sales ADD COLUMN pos_id TEXT DEFAULT 'POS-1'")
@@ -137,7 +130,6 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE sales ADD COLUMN tax_amount REAL DEFAULT 0.0")
     except: pass
-    # New Migrations
     try: c.execute("ALTER TABLE sales ADD COLUMN discount_amount REAL DEFAULT 0.0")
     except: pass
     try: c.execute("ALTER TABLE sales ADD COLUMN coupon_applied TEXT")
@@ -150,19 +142,21 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE customers ADD COLUMN segment TEXT DEFAULT 'New'")
     except: pass
-    # Analytics Migrations
     try: c.execute("ALTER TABLE products ADD COLUMN expiry_date TEXT")
     except: pass
     try: c.execute("ALTER TABLE products ADD COLUMN is_dead_stock TEXT DEFAULT 'False'")
     except: pass
-    # Visuals Migration
     try: c.execute("ALTER TABLE products ADD COLUMN image_data BLOB")
     except: pass
+    
+    # FIX 4 & 7: Cancellation Columns
+    try: c.execute("ALTER TABLE sales ADD COLUMN cancellation_reason TEXT")
+    except: pass
+    try: c.execute("ALTER TABLE sales ADD COLUMN cancelled_by TEXT")
+    except: pass
 
-    # --- CLEANUP ON RESTART ---
     c.execute("DELETE FROM active_sessions")
 
-    # --- SEED DATA ---
     defaults = {
         "store_name": "SmartInventory Enterprise",
         "upi_id": "merchant@okaxis",
@@ -213,7 +207,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- UTILITY FUNCTIONS ---
 def get_setting(key):
     conn = get_connection()
     c = conn.cursor()
@@ -237,26 +230,19 @@ def log_activity(user, action, details):
     conn.commit()
     conn.close()
 
-# --- ATOMIC TRANSACTION MANAGER (FIX FOR LOCKING ISSUES) ---
 def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer_mobile, 
                              tax_amount, discount_amount, coupon_code, points_redeemed, 
                              points_earned, integrity_hash, time_taken):
-    """
-    Handles the entire sale process in a SINGLE database connection to prevent 'database is locked' errors.
-    """
     conn = get_connection()
     c = conn.cursor()
     sale_id = None
     try:
-        # 1. Update Stock
         for item in cart_items:
             c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item['id'],))
         
-        # 2. Update Coupon Usage
         if coupon_code:
             c.execute("UPDATE coupons SET used_count = used_count + 1 WHERE code=?", (coupon_code,))
 
-        # 3. Insert Sale Record
         items_json = json.dumps([i['id'] for i in cart_items])
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -268,23 +254,19 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                  pos_id, customer_mobile, tax_amount, discount_amount, coupon_code, points_redeemed))
         sale_id = c.lastrowid
 
-        # 4. Update Customer Stats
         if customer_mobile:
             customer_mobile = customer_mobile.strip()
-            # Fetch current data first inside this transaction
             c.execute("SELECT total_spend, loyalty_points FROM customers WHERE mobile=?", (customer_mobile,))
             res = c.fetchone()
             if res:
                 curr_spend, curr_points = res
                 new_spend = curr_spend + total
                 
-                # Segmentation Logic
                 new_seg = "New"
                 if new_spend > 50000: new_seg = "High-Value"
                 elif new_spend > 10000: new_seg = "Regular"
                 else: new_seg = "Occasional"
                 
-                # Update stats
                 new_points = curr_points + points_earned - points_redeemed
                 c.execute("""UPDATE customers SET visits = visits + 1, total_spend = ?, 
                              loyalty_points = ?, segment = ? WHERE mobile=?""", 
@@ -298,40 +280,42 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
     finally:
         conn.close()
 
-# --- UNDO TRANSACTION LOGIC (Feature #5) ---
-def cancel_sale_transaction(sale_id, operator):
+# --- FIX 7: ROLE-BASED ORDER CANCELLATION ---
+def cancel_sale_transaction(sale_id, operator, role, reason):
     """
-    Reverses a transaction:
-    1. Mark sale as 'Cancelled'
-    2. Restore stock quantity for items in that sale
-    3. Log the cancellation
+    Enhanced Undo Logic:
+    - Checks role permissions
+    - Requires reason
+    - Updates cancelled_by and cancellation_reason
     """
     conn = get_connection()
     c = conn.cursor()
     try:
-        # Get sale details
-        c.execute("SELECT items_json, status FROM sales WHERE id=?", (sale_id,))
+        c.execute("SELECT items_json, status, operator FROM sales WHERE id=?", (sale_id,))
         res = c.fetchone()
         if not res:
             return False, "Sale ID not found"
         
-        items_json_str, status = res
+        items_json_str, status, sale_operator = res
         
         if status == 'Cancelled':
             return False, "Sale already cancelled"
             
+        # Permission Check
+        if role == 'Operator' and sale_operator != operator:
+            return False, "Permission Denied: Operators can only cancel their own sales."
+
         items_ids = json.loads(items_json_str)
         
-        # Restore Stock
         for pid in items_ids:
             c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
             
-        # Update Status
-        c.execute("UPDATE sales SET status = 'Cancelled' WHERE id=?", (sale_id,))
+        c.execute("""UPDATE sales SET status = 'Cancelled', cancellation_reason = ?, cancelled_by = ? 
+                     WHERE id=?""", (reason, operator, sale_id))
         
-        # Log
         c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
-                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Undo Sale", f"Cancelled Sale #{sale_id}"))
+                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Undo Sale", 
+                   f"Cancelled Sale #{sale_id}. Reason: {reason}"))
         
         conn.commit()
         return True, "Success"
@@ -342,11 +326,6 @@ def cancel_sale_transaction(sale_id, operator):
         conn.close()
 
 def redo_sale_transaction(sale_id, operator):
-    """
-    Re-applies a cancelled transaction:
-    1. Mark sale as 'Completed'
-    2. Deduct stock quantity
-    """
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -359,11 +338,10 @@ def redo_sale_transaction(sale_id, operator):
         
         items_ids = json.loads(items_json_str)
         
-        # Deduct Stock
         for pid in items_ids:
             c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (pid,))
             
-        c.execute("UPDATE sales SET status = 'Completed' WHERE id=?", (sale_id,))
+        c.execute("UPDATE sales SET status = 'Completed', cancellation_reason=NULL, cancelled_by=NULL WHERE id=?", (sale_id,))
         
         c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
                   (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Redo Sale", f"Restored Sale #{sale_id}"))
@@ -376,7 +354,6 @@ def redo_sale_transaction(sale_id, operator):
     finally:
         conn.close()
 
-# --- CUSTOMER MANAGEMENT (Updated) ---
 def get_customer(mobile):
     conn = get_connection()
     c = conn.cursor()
@@ -384,7 +361,6 @@ def get_customer(mobile):
     row = c.fetchone()
     conn.close()
     if row:
-        # Schema: mobile, name, email, visits, total_spend, loyalty_points, segment
         lp = row[5] if len(row) > 5 and row[5] is not None else 0
         seg = row[6] if len(row) > 6 and row[6] is not None else 'New'
         return {"mobile": row[0], "name": row[1], "email": row[2], "visits": row[3], "total_spend": row[4], "loyalty_points": lp, "segment": seg}
@@ -409,7 +385,6 @@ def get_all_customers():
     conn.close()
     return df
 
-# --- USER MANAGEMENT (Feature #1) ---
 def create_user(username, password, role, fullname):
     conn = get_connection()
     c = conn.cursor()
@@ -424,7 +399,6 @@ def create_user(username, password, role, fullname):
         conn.close()
 
 def update_user_status(username, status):
-    """Admin feature to disable/enable users."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("UPDATE users SET status=? WHERE username=?", (status, username))
@@ -437,7 +411,7 @@ def get_user_status(username):
     c.execute("SELECT status FROM users WHERE username=?", (username,))
     res = c.fetchone()
     conn.close()
-    return res[0] if res else "Active" # Default to active if not found (or during setup)
+    return res[0] if res else "Active"
 
 def update_password(username, new_password):
     conn = get_connection()
@@ -469,7 +443,6 @@ def verify_password(username, password):
     conn.close()
     return res is not None
 
-# --- MARKETING: COUPONS (Feature #2) ---
 def create_coupon(code, dtype, value, min_bill, days_valid, limit):
     valid_until = (datetime.now() + timedelta(days=days_valid)).strftime("%Y-%m-%d")
     conn = get_connection()
@@ -489,7 +462,6 @@ def get_coupon(code):
     c_data = c.fetchone()
     conn.close()
     if c_data:
-        # Schema: code, type, value, min_bill, valid_until, limit, used
         expiry = c_data[4]
         limit = c_data[5]
         used = c_data[6]
@@ -511,7 +483,17 @@ def get_all_coupons():
     conn.close()
     return df
 
-# --- MARKETING: CAMPAIGNS (Feature #3 & #8) ---
+# --- FIX 9: AUTOMATED COUPON GENERATION ---
+def generate_auto_coupon(customer_mobile):
+    """Generates a personalized coupon after a sale."""
+    if not customer_mobile: return None
+    
+    code = f"SAVE10-{random.randint(1000,9999)}"
+    # Simple rule: 10% off for next visit, valid 30 days
+    if create_coupon(code, "%", 10.0, 500.0, 30, 1):
+        return code
+    return None
+
 def create_campaign(name, c_type, start, end, config):
     conn = get_connection()
     c = conn.cursor()
@@ -521,20 +503,15 @@ def create_campaign(name, c_type, start, end, config):
     conn.close()
 
 def get_active_campaigns():
-    """Returns campaigns active RIGHT NOW."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM campaigns WHERE is_active='True' AND start_time <= ? AND end_time >= ?", conn, params=(now_str, now_str))
     conn.close()
     return df
 
-# --- MARKETING: LUCKY DRAW (Feature #4) ---
 def pick_lucky_winner(days_lookback, min_spend):
-    """Picks a random winner from sales in last X days above Y amount."""
     start_dt = (datetime.now() - timedelta(days=days_lookback)).strftime("%Y-%m-%d")
     conn = get_connection()
-    
-    # FIX: Updated query to handle empty strings/NULLs for mobile to ensure a valid winner is picked
     query = f"""
     SELECT DISTINCT customer_mobile
     FROM sales 
@@ -546,13 +523,11 @@ def pick_lucky_winner(days_lookback, min_spend):
     winner = None
     if not df.empty:
         winner_mobile = random.choice(df['customer_mobile'].tolist())
-        # Get name
         cust = get_customer(winner_mobile)
         name_val = cust['name'] if cust else "Unknown Customer"
         
         winner = {"name": name_val, "mobile": winner_mobile}
         
-        # Log it
         c = conn.cursor()
         c.execute("INSERT INTO lucky_draws (draw_date, winner_name, winner_mobile, prize, criteria) VALUES (?, ?, ?, ?, ?)",
                   (datetime.now().strftime("%Y-%m-%d"), winner['name'], winner['mobile'], "Mystery Gift", f"Spend > {min_spend}"))
@@ -567,7 +542,6 @@ def get_lucky_draw_history():
     conn.close()
     return df
 
-# --- TERMINAL MANAGEMENT ---
 def get_all_terminals():
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM terminals", conn)
@@ -610,7 +584,6 @@ def update_terminal_status(t_id, status):
     conn.commit()
     conn.close()
 
-# --- STOCK REQUESTS ---
 def create_stock_request(prod_id, prod_name, qty, notes, user):
     conn = get_connection()
     c = conn.cursor()
@@ -632,25 +605,19 @@ def update_request_status(req_id, status):
     conn.commit()
     conn.close()
 
-# --- PRODUCT MANAGEMENT (CRUD) ---
-
 def add_product(name, category, price, stock, cost_price, expiry_date=None, image_data=None):
     conn = get_connection()
     c = conn.cursor()
     
-    # Logic update for NA support
     if expiry_date == "NA":
         expiry_str = "NA"
     elif expiry_date:
         expiry_str = expiry_date.strftime("%Y-%m-%d")
     else:
-        # Default behavior if nothing specified: 1 year expiry (Backward compatibility)
         expiry_str = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
 
     try:
-        # Ensure image_data is bytes or None
         img_blob = sqlite3.Binary(image_data) if image_data else None
-        
         c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, is_dead_stock, image_data) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'False', ?)",
                   (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d"), expiry_str, img_blob))
         conn.commit()
@@ -677,7 +644,6 @@ def delete_product(p_id):
     conn.close()
 
 def toggle_dead_stock(p_id, is_dead):
-    """Marks a product as Dead Stock."""
     conn = get_connection()
     c = conn.cursor()
     val = 'True' if is_dead else 'False'
@@ -687,7 +653,6 @@ def toggle_dead_stock(p_id, is_dead):
 
 def get_all_products():
     conn = get_connection()
-    # Need to select image_data as well if used in views, usually safer to select *
     df = pd.read_sql("SELECT * FROM products", conn)
     conn.close()
     return df
@@ -699,16 +664,12 @@ def get_product_by_id(p_id):
     row = c.fetchone()
     conn.close()
     if row:
-        # Adjusted schema index for new columns
-        # id, name, category, price, stock, cost_price, sales_count, last_restock_date, expiry, dead_stock, image
-        # Using dict for safety as columns might shift
         col_names = [description[0] for description in c.description]
         data = dict(zip(col_names, row))
         return data
     return None
 
 def restock_product(p_id, quantity):
-    """Safely increments stock for a product."""
     if quantity <= 0: return False
     conn = get_connection()
     c = conn.cursor()
@@ -718,10 +679,7 @@ def restock_product(p_id, quantity):
     conn.close()
     return True
 
-# --- SESSION LOCKING ---
-
 def is_pos_occupied(pos_id):
-    """Returns username if occupied, else None"""
     if pos_id == "Office Dashboard": return None
     conn = get_connection()
     c = conn.cursor()
@@ -755,44 +713,16 @@ def force_clear_all_sessions():
     conn.commit()
     conn.close()
 
-# --- ANALYTICS DATA ---
-
 def get_sales_data():
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM sales", conn)
     conn.close()
     return df
 
-def seed_historical_data_if_needed():
-    """Retained for backward compatibility. Use seed_advanced_demo_data instead."""
-    seed_advanced_demo_data()
-
-def get_categories_list():
-    conn = get_connection()
-    df = pd.read_sql("SELECT name FROM categories", conn)
-    conn.close()
-    return df['name'].tolist()
-
-def add_category(name):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        conn.close()
-        return False
-
-# --- NEW: ADVANCED DEMO DATA & FEATURES ---
-
 def seed_advanced_demo_data():
-    """Populates the database with rich demo data for categories, products, users, and sales."""
     conn = get_connection()
     c = conn.cursor()
 
-    # 1. Categories
     demo_categories = [
         "Snacks", "Beverages", "Grocery", "Dairy", "Bakery", 
         "Frozen", "Personal Care", "Stationery", "Electronics", "Household"
@@ -800,7 +730,6 @@ def seed_advanced_demo_data():
     for cat in demo_categories:
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
 
-    # 2. Products (~150 items)
     c.execute("SELECT count(*) FROM products")
     if c.fetchone()[0] < 50:
         demo_products = {
@@ -818,13 +747,11 @@ def seed_advanced_demo_data():
         for cat, items in demo_products.items():
             for name, price, cost in items:
                 stock = random.randint(20, 100)
-                # Random expiry 30-365 days
                 exp_days = random.randint(30, 365)
                 expiry = (datetime.now() + timedelta(days=exp_days)).strftime("%Y-%m-%d")
                 c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date, is_dead_stock) VALUES (?, ?, ?, ?, ?, ?, ?, 'False')",
                           (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
     
-    # 3. Users (Multi-Role)
     demo_users = [
         ('ammar_admin', 'admin123', 'Admin', 'Ammar Husain'),
         ('manager_1', 'manager123', 'Manager', 'Sarah Manager'),
@@ -836,19 +763,16 @@ def seed_advanced_demo_data():
     ]
     for u, p, r, n in demo_users:
         ph = hashlib.sha256(p.encode()).hexdigest()
-        # FIX: Changed INSERT OR IGNORE to INSERT OR REPLACE to ensure password updates and fixes are applied
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
-    # 4. Sales & Transactions (50+ records)
     c.execute("SELECT count(*) FROM sales")
     if c.fetchone()[0] < 20:
         ops = ['pos_op_1', 'pos_op_2', 'pos_op_3', 'pos_op_4']
         modes = ['Cash', 'UPI', 'Card']
         c.execute("SELECT id, price FROM products")
-        all_prods = c.fetchall() # List of (id, price)
+        all_prods = c.fetchall()
         
         for i in range(50):
-            # Randomize date within last 30 days
             days_ago = random.randint(0, 30)
             txn_dt = datetime.now() - timedelta(days=days_ago, hours=random.randint(0, 12), minutes=random.randint(0, 59))
             timestamp = txn_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -856,23 +780,18 @@ def seed_advanced_demo_data():
             operator = random.choice(ops)
             mode = random.choice(modes)
             
-            # Random Cart
             num_items = random.randint(1, 8)
             cart_items = random.sample(all_prods, min(num_items, len(all_prods)))
             total = sum(p[1] for p in cart_items)
             items_json = json.dumps([p[0] for p in cart_items])
             
-            # Customer
-            cust_name = f"Customer {i+1}"
             cust_mobile = f"98765{random.randint(10000, 99999)}"
             
-            # Insert Sales
             c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
                          operator, payment_mode, time_taken, pos_id, customer_mobile, status) 
                          VALUES (?, ?, ?, 'demo_hash', ?, ?, ?, 'POS-1', ?, 'Completed')""",
                       (timestamp, total, items_json, operator, mode, random.randint(20, 120), cust_mobile))
             
-            # Insert Log
             c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, 'Sale', ?)",
                       (timestamp, operator, f"Completed Sale #{i+1} for {total}"))
 
@@ -880,8 +799,7 @@ def seed_advanced_demo_data():
     conn.close()
 
 def get_transaction_history(filters=None):
-    """Retrieves full transaction history with optional filters."""
-    query = "SELECT id, timestamp, total_amount, payment_mode, operator, customer_mobile, status FROM sales WHERE 1=1"
+    query = "SELECT id, timestamp, total_amount, payment_mode, operator, customer_mobile, status, pos_id, integrity_hash FROM sales WHERE 1=1"
     params = []
     
     if filters:
@@ -898,7 +816,6 @@ def get_transaction_history(filters=None):
     query += " ORDER BY id DESC"
     
     conn = get_connection()
-    # FIX: Robustly handle potential issues with data types or empty results
     try:
         df = pd.read_sql(query, conn, params=params)
     except:
@@ -908,18 +825,15 @@ def get_transaction_history(filters=None):
     return df
 
 def get_full_logs():
-    """Retrieves all system logs."""
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM logs ORDER BY id DESC", conn)
     conn.close()
     return df
 
 def get_category_performance():
-    """Analyzes sales by category."""
     conn = get_connection()
-    # Join sales and products (simulated via parsing) - SQLite doesn't have easy JSON parse in old versions
-    # So we fetch sales and process in Python
-    sales = pd.read_sql("SELECT items_json, total_amount FROM sales", conn)
+    # FIX 3: Exclude Cancelled Orders
+    sales = pd.read_sql("SELECT items_json, total_amount FROM sales WHERE status != 'Cancelled'", conn)
     products = pd.read_sql("SELECT id, category FROM products", conn)
     conn.close()
     
@@ -929,10 +843,11 @@ def get_category_performance():
     for _, row in sales.iterrows():
         try:
             item_ids = json.loads(row['items_json'])
+            if not item_ids: continue
+            
             for iid in item_ids:
                 cat = cat_map.get(iid, "Unknown")
-                # Estimate item price share (simplified: average split)
-                share = row['total_amount'] / len(item_ids) if item_ids else 0
+                share = row['total_amount'] / len(item_ids) 
                 cat_sales[cat] = cat_sales.get(cat, 0) + share
         except: continue
         
