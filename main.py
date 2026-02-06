@@ -246,7 +246,8 @@ def pos_interface():
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
             col_c1, col_c2 = st.columns([2, 1])
             with col_c1:
-                cust_phone = st.text_input("Customer Mobile", value=st.session_state['current_customer']['mobile'] if st.session_state['current_customer'] else "")
+                # Fix: Strip whitespace to prevent duplicates
+                cust_phone = st.text_input("Customer Mobile", value=st.session_state['current_customer']['mobile'] if st.session_state['current_customer'] else "").strip()
             with col_c2:
                 st.write("")
                 st.write("")
@@ -276,24 +277,38 @@ def pos_interface():
                             st.error("Name is required.")
 
         st.markdown("---")
-        # FEATURE 6: QR SCAN INPUT
+        # FEATURE 6: QR SCAN INPUT & CAMERA
         col_scan, col_manual = st.columns([1, 2])
         with col_scan:
             st.markdown("##### 📷 Scan QR")
-            qr_input = st.text_input("Scan Product QR (PROD:ID)", key="qr_scan_input", help="Simulate scanner input here")
+            # Text based scan
+            qr_input = st.text_input("Simulate Scan (PROD:ID)", key="qr_scan_input", help="Simulate scanner input here")
+            # Camera scan
+            cam_input = st.camera_input("Use Camera")
+            
+            scanned_pid = None
             if qr_input:
-                pid = utils.parse_qr_input(qr_input)
-                if pid:
-                    prod = db.get_product_by_id(pid)
-                    if prod:
-                        cart_qty = sum(1 for x in st.session_state['cart'] if x['id'] == pid)
-                        if prod['stock'] > cart_qty:
-                            st.session_state['cart'].append(prod)
-                            st.toast(f"Scanned: {prod['name']}")
-                        else:
-                            st.error("Out of Stock!")
+                scanned_pid = utils.parse_qr_input(qr_input)
+            elif cam_input:
+                decoded_text = utils.decode_qr_image(cam_input)
+                if decoded_text:
+                    scanned_pid = utils.parse_qr_input(decoded_text)
+                    if not scanned_pid:
+                        st.error(f"Invalid Product QR: {decoded_text}")
+                else:
+                    st.caption("No QR code detected.")
+
+            if scanned_pid:
+                prod = db.get_product_by_id(scanned_pid)
+                if prod:
+                    cart_qty = sum(1 for x in st.session_state['cart'] if x['id'] == scanned_pid)
+                    if prod['stock'] > cart_qty:
+                        st.session_state['cart'].append(prod)
+                        st.toast(f"Scanned: {prod['name']}")
                     else:
-                        st.error("Product Not Found")
+                        st.error("Out of Stock!")
+                else:
+                    st.error("Product Not Found")
 
         with col_manual:
             st.markdown("##### ⌨️ Manual Search")
@@ -302,6 +317,11 @@ def pos_interface():
                 query = st.text_input("Search Product", key="pos_search")
             with c_algo:
                 algo = st.selectbox("Search Algo", ["Trie (O(L))", "Linear (O(N))"])
+                # Fix 7: Algorithm Explanations
+                if algo.startswith("Trie"):
+                    st.caption("ℹ️ **Trie**: Fast prefix search. Efficient for autocomplete.")
+                else:
+                    st.caption("ℹ️ **Linear**: Checks every item. Simple but slower for large data.")
 
         left_panel, right_panel = st.columns([2, 1])
 
@@ -324,7 +344,10 @@ def pos_interface():
             cols = st.columns(3)
             for i, item in enumerate(visible_items):
                 with cols[i % 3]:
-                    st.markdown(styles.product_card_html(item['name'], item['price'], item['stock'], item['category'], currency), unsafe_allow_html=True)
+                    # Fix 4: Pass image data to card
+                    st.markdown(styles.product_card_html(
+                        item['name'], item['price'], item['stock'], item['category'], currency, item.get('image_data')
+                    ), unsafe_allow_html=True)
                     
                     cart_qty = sum(1 for x in st.session_state['cart'] if x['id'] == item['id'])
                     
@@ -355,19 +378,22 @@ def pos_interface():
                 
                 raw_total = summary['Total'].sum()
                 
-                # FEATURE 2: COUPONS
+                # FEATURE 2: COUPONS (Fix #1: NameError Handler)
                 st.markdown("##### 🎟️ Coupons & Loyalty")
                 c_code = st.text_input("Enter Coupon Code")
                 if st.button("Apply Coupon"):
-                    cpn, msg = db.get_coupon(c_code)
-                    if cpn:
-                        if raw_total >= cpn['min_bill']:
-                            st.session_state['applied_coupon'] = cpn
-                            st.success(f"Coupon Applied: {msg}")
+                    try:
+                        cpn, msg = db.get_coupon(c_code)
+                        if cpn:
+                            if raw_total >= cpn['min_bill']:
+                                st.session_state['applied_coupon'] = cpn
+                                st.success(f"Coupon Applied: {msg}")
+                            else:
+                                st.error(f"Min bill required: {cpn['min_bill']}")
                         else:
-                            st.error(f"Min bill required: {cpn['min_bill']}")
-                    else:
-                        st.error(msg)
+                            st.error(msg)
+                    except Exception as e:
+                        st.error(f"Error applying coupon: {str(e)}")
                 
                 # FEATURE 5: LOYALTY REDEMPTION
                 cust = st.session_state.get('current_customer')
@@ -462,6 +488,7 @@ def pos_interface():
                 st.session_state['selected_payment_mode'] = 'UPI'
                 st.session_state['checkout_stage'] = 'payment_process'
                 st.session_state['qr_expiry'] = None # Reset Timer
+                st.session_state.pop('upi_txn_ref', None) # Reset Ref for new txn
                 st.rerun()
         with c3:
             st.markdown("#### 💳 Card")
@@ -502,12 +529,17 @@ def pos_interface():
             if st.session_state['qr_expiry'] is None:
                 st.session_state['qr_expiry'] = time.time() + 240 # 4 mins
             
+            # FIX 3: Generate Reference ONCE per session to stop QR flashing
+            if 'upi_txn_ref' not in st.session_state:
+                st.session_state['upi_txn_ref'] = f"INV-{random.randint(1000,9999)}"
+            
             remaining = int(st.session_state['qr_expiry'] - time.time())
             
             c_qr, c_info = st.columns([1, 1])
             with c_qr:
                 upi_id = db.get_setting("upi_id")
-                txn_ref = f"INV-{random.randint(1000,9999)}"
+                # Use stored ref
+                txn_ref = st.session_state['upi_txn_ref']
                 qr_img = utils.generate_upi_qr(upi_id, store_name, total, txn_ref)
                 st.image(qr_img, width=250, caption=f"Scan to Pay: {currency}{total:.2f}")
             
@@ -530,6 +562,7 @@ def pos_interface():
                     st.error("⏰ QR Code Expired")
                     if st.button("🔄 Regenerate"):
                         st.session_state['qr_expiry'] = None
+                        st.session_state.pop('upi_txn_ref', None)
                         st.rerun()
 
         # LOGIC FOR CARD
@@ -556,10 +589,12 @@ def pos_interface():
         st.title("✅ Payment Successful")
         st.caption("Transaction has been recorded.")
         
+        # FIX 5: Better Receipt Buttons
         c_rec1, c_rec2 = st.columns(2)
         with c_rec1:
             if 'last_receipt' in st.session_state:
-                st.download_button("📥 Download Receipt PDF", st.session_state['last_receipt'], "receipt.pdf", "application/pdf", use_container_width=True)
+                st.markdown("""<style>.box-btn{border:1px solid #444; padding:15px; border-radius:10px; text-align:center; display:block; text-decoration:none; color:inherit; background:#222; margin:10px;}</style>""", unsafe_allow_html=True)
+                st.download_button("📄 Download Receipt PDF", st.session_state['last_receipt'], "receipt.pdf", "application/pdf", use_container_width=True)
         
         with c_rec2:
             if st.button("🛒 Start New Sale", type="primary", use_container_width=True):
@@ -568,6 +603,7 @@ def pos_interface():
                 st.session_state['checkout_stage'] = 'cart'
                 st.session_state['applied_coupon'] = None
                 st.session_state['points_to_redeem'] = 0
+                st.session_state.pop('upi_txn_ref', None)
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -612,7 +648,8 @@ def finalize_sale(total, mode):
         st.session_state['undo_stack'].append(sale_id)
         
         tax_info = {"tax_amount": calc['tax'], "tax_percent": 18}
-        pdf = utils.generate_receipt_pdf(store_name, sale_id, datetime.now().strftime("%Y-%m-%d %H:%M"), st.session_state['cart'], total, st.session_state['full_name'], mode, st.session_state['pos_id'], customer, tax_info)
+        # Updated pdf gen call
+        pdf = utils.generate_receipt_pdf(store_name, sale_id, txn_time, st.session_state['cart'], total, operator, mode, st.session_state['pos_id'], customer, tax_info)
         
         st.session_state['last_receipt'] = pdf
         st.session_state['checkout_stage'] = 'receipt'
@@ -676,6 +713,9 @@ def inventory_manager():
             cp = st.number_input("Cost Price", min_value=0.0)
             s = st.number_input("Initial Stock", min_value=0)
             
+            # Feature 4: Product Image Upload
+            img_file = st.file_uploader("Product Image (Optional)", type=['png', 'jpg', 'jpeg'])
+            
             # New Expiry Logic
             has_expiry = st.radio("Does this product have an expiry date?", ["Yes", "No"], index=0, horizontal=True)
             exp = None
@@ -685,7 +725,8 @@ def inventory_manager():
                 exp = "NA"
             
             if st.form_submit_button("Add Product"):
-                if db.add_product(n, c, p, s, cp, exp):
+                img_bytes = img_file.getvalue() if img_file else None
+                if db.add_product(n, c, p, s, cp, exp, img_bytes):
                     st.success(f"Added {n}")
                     st.rerun()
                 else: st.error("Error adding product")
@@ -794,6 +835,10 @@ def analytics_dashboard():
         if not pl_df.empty:
             st.bar_chart(pl_df.set_index('Category')['Profit'])
             st.dataframe(pl_df.style.format({"Revenue": "{:,.2f}", "Cost": "{:,.2f}", "Profit": "{:,.2f}", "Margin %": "{:.1f}%"}), use_container_width=True)
+            
+            # FIX 8: New Profit vs Loss Bar Chart
+            st.markdown("#### 💹 Profit vs Revenue")
+            st.bar_chart(pl_df.set_index('Category')[['Revenue', 'Profit']])
         else:
             st.info("No data available")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -836,10 +881,32 @@ def analytics_dashboard():
 
     with t3:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        # FIX 8: Enhanced Charts
+        c_trend1, c_trend2 = st.columns(2)
+        
+        # Daily Trend
         daily = df_sales.groupby(df_sales['date'].dt.date)['total_amount'].sum().reset_index()
         trend_dir = utils.analyze_trend_slope(daily['total_amount'].values)
         st.info(f"Market Trend (Algo #32): {trend_dir}")
-        st.line_chart(daily.set_index('date')['total_amount'])
+        
+        with c_trend1:
+            st.markdown("#### 📅 Daily Sales Trend")
+            st.line_chart(daily.set_index('date')['total_amount'])
+            
+        with c_trend2:
+            st.markdown("#### 💳 Payment Method Usage (Pie)")
+            pay_dist = df_sales['payment_mode'].value_counts()
+            fig, ax = plt.subplots()
+            ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%', startangle=90, colors=['#6366f1', '#10b981', '#f59e0b'])
+            ax.axis('equal') 
+            st.pyplot(fig)
+            
+        # Monthly Trend
+        st.markdown("#### 📆 Monthly Sales Trend")
+        df_sales['month'] = df_sales['date'].dt.to_period('M').astype(str)
+        monthly = df_sales.groupby('month')['total_amount'].sum()
+        st.bar_chart(monthly)
+
         st.markdown("</div>", unsafe_allow_html=True)
     with t4:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
@@ -917,7 +984,11 @@ def analytics_dashboard():
         if not cat_perf.empty:
             c1, c2 = st.columns([2, 1])
             with c1:
-                st.bar_chart(cat_perf.set_index('Category'))
+                # FIX 8: Pie Chart for Category Distribution
+                fig, ax = plt.subplots()
+                ax.pie(cat_perf['Revenue'], labels=cat_perf['Category'], autopct='%1.1f%%', startangle=90)
+                ax.axis('equal')
+                st.pyplot(fig)
             with c2:
                 st.dataframe(cat_perf, use_container_width=True)
         else:
