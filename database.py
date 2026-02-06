@@ -51,7 +51,7 @@ def init_db():
                   timestamp TEXT, 
                   total_amount REAL, 
                   items_json TEXT, 
-                  integrity_hash TEXT,
+                  integrity_hash TEXT, 
                   operator TEXT, 
                   payment_mode TEXT, 
                   status TEXT DEFAULT 'Completed', 
@@ -781,35 +781,77 @@ def seed_advanced_demo_data():
         ph = hashlib.sha256(p.encode()).hexdigest()
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
+    # REALISTIC CUSTOMER DATA FOR EXAM EVALUATION
+    demo_customers = [
+        ("9876500001", "Amit Sharma", "amit.s@example.com", "Regular"),
+        ("9876500002", "Priya Singh", "priya.s@example.com", "High-Value"),
+        ("9876500003", "Rahul Verma", "rahul.v@example.com", "Occasional"),
+        ("9876500004", "Sneha Gupta", "sneha.g@example.com", "New"),
+        ("9876500005", "Vikram Malhotra", "vikram.m@example.com", "High-Value"),
+        ("9876500006", "Anjali Mehta", "anjali.m@example.com", "Regular"),
+        ("9876500007", "Rohan Das", "rohan.d@example.com", "New"),
+        ("9876500008", "Ishita Patel", "ishita.p@example.com", "Regular"),
+        ("9876500009", "Karan Johar", "karan.j@example.com", "Occasional"),
+        ("9876500010", "Simran Kaur", "simran.k@example.com", "High-Value"),
+        ("9876500011", "Arjun Rampal", "arjun.r@example.com", "Regular"),
+        ("9876500012", "Deepika P", "deepika.p@example.com", "High-Value"),
+        ("9876500013", "Ranveer S", "ranveer.s@example.com", "Regular"),
+        ("9876500014", "Alia B", "alia.b@example.com", "New"),
+        ("9876500015", "Ranbir K", "ranbir.k@example.com", "Occasional"),
+        ("9876500016", "Katrina K", "katrina.k@example.com", "Regular"),
+        ("9876500017", "Salman K", "salman.k@example.com", "High-Value"),
+        ("9876500018", "Shahrukh K", "shahrukh.k@example.com", "High-Value"),
+        ("9876500019", "Aamir K", "aamir.k@example.com", "Occasional"),
+        ("9876500020", "Akshay K", "akshay.k@example.com", "Regular")
+    ]
+    for mob, name, email, seg in demo_customers:
+        c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend, loyalty_points) VALUES (?, ?, ?, ?, 0, 0, 0)", 
+                  (mob, name, email, seg))
+
     c.execute("SELECT count(*) FROM sales")
-    if c.fetchone()[0] < 20:
+    if c.fetchone()[0] < 50:
         ops = ['pos_op_1', 'pos_op_2', 'pos_op_3', 'pos_op_4']
         modes = ['Cash', 'UPI', 'Card']
         c.execute("SELECT id, price FROM products")
         all_prods = c.fetchall()
         
-        for i in range(50):
+        for i in range(60): # Generate 60 transactions
             days_ago = random.randint(0, 30)
             txn_dt = datetime.now() - timedelta(days=days_ago, hours=random.randint(0, 12), minutes=random.randint(0, 59))
             timestamp = txn_dt.strftime("%Y-%m-%d %H:%M:%S")
             
             operator = random.choice(ops)
             mode = random.choice(modes)
+            cust = random.choice(demo_customers)
+            cust_mobile = cust[0]
             
             num_items = random.randint(1, 8)
             cart_items = random.sample(all_prods, min(num_items, len(all_prods)))
             total = sum(p[1] for p in cart_items)
             items_json = json.dumps([p[0] for p in cart_items])
             
-            cust_mobile = f"98765{random.randint(10000, 99999)}"
+            # 10% chance of being cancelled
+            status = 'Completed'
+            reason = None
+            cancelled_by = None
+            if random.random() < 0.1:
+                status = 'Cancelled'
+                reason = 'Customer Changed Mind'
+                cancelled_by = 'ammar_admin'
             
             c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
-                         operator, payment_mode, time_taken, pos_id, customer_mobile, status) 
-                         VALUES (?, ?, ?, 'demo_hash', ?, ?, ?, 'POS-1', ?, 'Completed')""",
-                      (timestamp, total, items_json, operator, mode, random.randint(20, 120), cust_mobile))
+                         operator, payment_mode, time_taken, pos_id, customer_mobile, status, cancellation_reason, cancelled_by) 
+                         VALUES (?, ?, ?, 'demo_hash', ?, ?, ?, 'POS-1', ?, ?, ?, ?)""",
+                      (timestamp, total, items_json, operator, mode, random.randint(20, 120), cust_mobile, status, reason, cancelled_by))
             
-            c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, 'Sale', ?)",
-                      (timestamp, operator, f"Completed Sale #{i+1} for {total}"))
+            if status == 'Completed':
+                c.execute("UPDATE customers SET visits = visits + 1, total_spend = total_spend + ?, loyalty_points = loyalty_points + ? WHERE mobile=?",
+                        (total, int(total/100), cust_mobile))
+                c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, 'Sale', ?)",
+                        (timestamp, operator, f"Completed Sale for {total}"))
+            else:
+                c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, 'Undo Sale', ?)",
+                        (timestamp, operator, f"Cancelled Sale for {total}"))
 
     conn.commit()
     conn.close()
