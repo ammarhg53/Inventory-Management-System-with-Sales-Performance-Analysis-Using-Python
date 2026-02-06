@@ -78,7 +78,9 @@ def generate_qr_labels_pdf(products):
         # Text
         pdf.set_xy(x + 2, y + 2)
         pdf.set_font("Arial", 'B', 8)
-        pdf.multi_cell(w-4, 4, f"{p['name'][:35]}", align='C')
+        # Safe string for FPDF (latin-1)
+        safe_name = p['name'].encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(w-4, 4, f"{safe_name[:35]}", align='C')
         
         pdf.set_xy(x + 2, y + 10)
         pdf.set_font("Arial", '', 7)
@@ -89,12 +91,14 @@ def generate_qr_labels_pdf(products):
         
         # Save temp image
         temp_path = f"temp_qr_{p['id']}.png"
-        with open(temp_path, "wb") as f:
-            f.write(qr_bytes)
-            
-        # Place Image
-        pdf.image(temp_path, x=x+20, y=y+16, w=20, h=20)
-        os.remove(temp_path)
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(qr_bytes)
+            # Place Image
+            pdf.image(temp_path, x=x+20, y=y+16, w=20, h=20)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         
         col += 1
         if col >= 3:
@@ -105,6 +109,89 @@ def generate_qr_labels_pdf(products):
                 pdf.add_page()
                 
     return pdf.output(dest='S').encode('latin-1')
+
+# --- ADVANCED EXPIRY LOGIC (FEATURE #6) ---
+def calculate_advanced_loss_prevention(cart_items):
+    """
+    Implements Stepwise Loss Prevention Algorithm:
+    - 60-90 days left: 40% OFF
+    - 30-60 days left: 50% OFF
+    - 10-30 days left: BOGO
+    - <= 10 days left: FREE
+    
+    Returns: (total_discount, messages)
+    """
+    if not cart_items: return 0.0, []
+    
+    today = datetime.now()
+    discount = 0.0
+    messages = []
+    
+    # Group items by ID to handle quantity
+    item_counts = {} # {id: {item_obj, count}}
+    
+    for item in cart_items:
+        if item['id'] not in item_counts:
+            item_counts[item['id']] = {'obj': item, 'count': 0}
+        item_counts[item['id']]['count'] += 1
+        
+    for pid, data in item_counts.items():
+        item = data['obj']
+        qty = data['count']
+        
+        exp_date_str = item.get('expiry_date')
+        if not exp_date_str or str(exp_date_str).upper() == "NA":
+            continue
+            
+        try:
+            exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
+            days_left = (exp_date - today).days
+            
+            # --- STEPWISE LOGIC ---
+            if days_left < 0:
+                # Expired: Should technically be blocked, but if in cart, ignore or warn?
+                # We won't discount it, main app logic should handle "Remove".
+                pass
+            
+            elif days_left <= 10:
+                # FREE (Near Expiry)
+                item_discount = qty * item['price']
+                discount += item_discount
+                messages.append(f"CRITICAL: {item['name']} is FREE (Expires in {days_left}d)")
+                
+            elif 10 < days_left <= 30:
+                # BOGO (Buy 1 Get 1 Free)
+                free_items = qty // 2
+                if free_items > 0:
+                    item_discount = free_items * item['price']
+                    discount += item_discount
+                    messages.append(f"BOGO Applied: {item['name']} ({days_left}d left)")
+            
+            elif 30 < days_left <= 60:
+                # 50% OFF
+                item_discount = qty * item['price'] * 0.50
+                discount += item_discount
+                messages.append(f"50% Clearance: {item['name']} ({days_left}d left)")
+                
+            elif 60 < days_left <= 90:
+                # 40% OFF
+                item_discount = qty * item['price'] * 0.40
+                discount += item_discount
+                messages.append(f"40% Discount: {item['name']} ({days_left}d left)")
+                
+        except:
+            pass
+            
+    return discount, messages
+
+def calculate_expiry_bogo(cart_items):
+    """
+    Wrapper for backward compatibility. 
+    Calls the new advanced logic but only returns BOGO portion if isolated?
+    Actually, easiest to map it to the new function for general usage.
+    """
+    # Simply call the new function to ensure logic consistency
+    return calculate_advanced_loss_prevention(cart_items)
 
 def parse_qr_input(data_str):
     """
@@ -475,52 +562,6 @@ def analyze_risk_inventory(df_products):
         "expired_loss": expired_stock_val,
         "near_expiry_risk": near_expiry_val
     }, pd.DataFrame(risk_data)
-
-# --- NEW: EXPIRY BOGO LOGIC (Feature #4) ---
-def calculate_expiry_bogo(cart_items):
-    """
-    Calculates Buy One Get One Free logic strictly for Near-Expiry items.
-    Returns: Discount Amount, List of message strings
-    """
-    if not cart_items: return 0.0, []
-    
-    today = datetime.now()
-    discount = 0.0
-    messages = []
-    
-    # Group items by ID to handle quantity
-    item_counts = {} # {id: {item_obj, count}}
-    
-    for item in cart_items:
-        if item['id'] not in item_counts:
-            item_counts[item['id']] = {'obj': item, 'count': 0}
-        item_counts[item['id']]['count'] += 1
-        
-    for pid, data in item_counts.items():
-        item = data['obj']
-        qty = data['count']
-        
-        # Check Expiry Logic
-        exp_date_str = item.get('expiry_date')
-        is_near_expiry = False
-        
-        if exp_date_str and str(exp_date_str).upper() != "NA":
-            try:
-                exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
-                days_left = (exp_date - today).days
-                if 0 <= days_left < 30:
-                    is_near_expiry = True
-            except: pass
-            
-        if is_near_expiry and qty >= 2:
-            # Logic: For every 2 bought, 1 is free (cost of 1 deducted)
-            # Actually BOGO implies: Buy 1, Get 1 Free. So pairs.
-            free_items = qty // 2
-            item_discount = free_items * item['price']
-            discount += item_discount
-            messages.append(f"BOGO Applied on {item['name']} (Expires Soon): -{item_discount:.2f}")
-            
-    return discount, messages
 
 # --- NEW: FINANCIAL RATIOS ---
 def calculate_financial_ratios(df_sales, df_products):
