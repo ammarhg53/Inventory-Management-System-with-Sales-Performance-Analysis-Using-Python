@@ -6,4 +6,4 @@ fpdf
 qrcode
 Pillow
 pyzbar
-opencv-python-headless
+opencv-python
