@@ -15,22 +15,19 @@ import json
 from PIL import Image
 
 # --- CONDITIONAL IMPORT FOR OPENCV (CLOUD COMPATIBILITY) ---
-# Streamlit Cloud (Linux) often lacks libGL.so.1 (OpenGL) required by cv2.
-# We catch the import error to prevent app crash on startup.
 try:
     import cv2
 except (ImportError, OSError):
     cv2 = None
 
-# Import pyzbar for QR decoding (Fix #2)
+# --- FIX 1: ROBUST PYZBAR IMPORT ---
+# Catch OSError which happens when libzbar0 is missing on Linux
 try:
     from pyzbar.pyzbar import decode as qr_decode
-except ImportError:
+except (ImportError, OSError):
     qr_decode = None
 
-# --- CONDITIONAL IMPORT FOR TKINTER (CLOUD COMPATIBILITY) ---
-# Streamlit Cloud (Linux) usually lacks Tk libraries.
-# We catch the import error to prevent app crash on startup.
+# --- CONDITIONAL IMPORT FOR TKINTER ---
 try:
     import tkinter as tk
     from PIL import ImageTk
@@ -38,7 +35,7 @@ except (ImportError, OSError):
     tk = None
     ImageTk = None
 
-# --- REAL-TIME LIVE SCANNER (NEW FEATURE) ---
+# --- REAL-TIME LIVE SCANNER ---
 class LiveBarcodeScanner:
     def __init__(self):
         self.detected_code = None
@@ -47,28 +44,18 @@ class LiveBarcodeScanner:
         self.panel = None
 
     def start_scanner(self):
-        """
-        Opens a Tkinter window showing live video feed.
-        Scans for barcodes/QRs in real-time.
-        Auto-closes upon detection.
-        """
-        # Safety checks for dependencies
         if tk is None or cv2 is None:
             return None
 
-        # Initialize Camera
         self.cap = cv2.VideoCapture(0)
-        
         if not self.cap.isOpened():
             return None, "Error: Could not access camera."
 
-        # Setup GUI Window
         self.root = tk.Tk()
         self.root.title("POS Live Scanner - Point at Barcode")
         self.root.geometry("640x520")
         self.root.resizable(False, False)
         
-        # UI Elements
         lbl_instruct = tk.Label(self.root, text="Scanning... Hold product steady.", font=("Arial", 12), bg="black", fg="white")
         lbl_instruct.pack(fill=tk.X)
         
@@ -78,49 +65,38 @@ class LiveBarcodeScanner:
         btn_cancel = tk.Button(self.root, text="Cancel Scan", command=self.close_scanner, bg="#ef4444", fg="white", font=("Arial", 10, "bold"))
         btn_cancel.pack(pady=5)
 
-        # Start Video Loop
         self.video_loop()
-        
-        # Start GUI
         self.root.protocol("WM_DELETE_WINDOW", self.close_scanner)
         self.root.mainloop()
         
-        # Cleanup
         if self.cap and self.cap.isOpened():
             self.cap.release()
             
         return self.detected_code
 
     def video_loop(self):
-        if self.detected_code: return # Stop if found
+        if self.detected_code: return
 
         ret, frame = self.cap.read()
         if ret:
-            # 1. Detect Barcode
             decoded_objects = qr_decode(frame)
-            
-            # 2. Visual Feedback (Draw Box)
             for obj in decoded_objects:
                 points = obj.polygon
                 if len(points) == 4:
                     pts = np.array(points, dtype=np.int32)
                     cv2.polylines(frame, [pts], True, (0, 255, 0), 3)
                 
-                # 3. Capture Data & Close
                 raw_data = obj.data.decode("utf-8")
                 self.detected_code = raw_data
-                self.root.after(500, self.close_scanner) # Delay slightly to show green box
+                self.root.after(500, self.close_scanner)
                 
-            # Convert to Tkinter Image
             cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
             img = Image.fromarray(cv2image)
-            # Safe access to ImageTk (guarded by init check via main wrapper)
             if ImageTk:
                 imgtk = ImageTk.PhotoImage(image=img)
                 self.panel.imgtk = imgtk
                 self.panel.config(image=imgtk)
             
-            # Loop
             self.root.after(10, self.video_loop)
         else:
             self.close_scanner()
@@ -132,11 +108,9 @@ class LiveBarcodeScanner:
             self.root = None
 
 def run_live_scan():
-    """Wrapper function to invoke the scanner safely."""
     if qr_decode is None:
-        return None, "Error: pyzbar library not installed."
+        return None, "Error: pyzbar library not installed (missing libzbar0)."
     
-    # CLOUD SAFETY CHECK
     if tk is None:
         return None, "⚠️ Live camera scanning is disabled in Cloud Runtime (Tkinter missing). Use manual entry."
     
@@ -153,30 +127,22 @@ def run_live_scan():
     except Exception as e:
         return None, f"Scanner Error: {str(e)}"
 
-# --- FEATURE 5: LOYALTY LOGIC ---
+# --- LOYALTY ---
 def calculate_loyalty_points(amount):
-    """Earn 1 point for every 100 currency units."""
     return int(amount // 100)
 
-# --- FEATURE 7: RECOMMENDATION ENGINE ---
+# --- RECOMMENDATION ---
 def get_personalized_offer(customer, product_df):
-    """
-    Returns a simple recommendation string based on dummy logic (random category).
-    Real AI would use collaborative filtering here.
-    """
     if not customer: return "Scan customer to see offers."
-    
-    # Mock Logic: Suggest a product from a random category
     if not product_df.empty:
         cats = product_df['category'].unique()
         fav_cat = random.choice(cats)
         return f"🌟 Special for you: 10% OFF on all {fav_cat} today!"
     return "Check out our new arrivals!"
 
-# --- QR CODE GENERATION ---
+# --- QR GENERATION ---
 def generate_product_qr_image(product_id, product_name):
-    """Generates a QR code image specifically for products."""
-    data = f"PROD:{product_id}" # Simple Format
+    data = f"PROD:{product_id}"
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(data)
     qr.make(fit=True)
@@ -187,9 +153,8 @@ def generate_product_qr_image(product_id, product_name):
 
 def generate_qr_labels_pdf(products):
     """
-    Generates a PDF with printable QR labels for the given products.
-    Each label includes: Name, ID, Category, QR Code.
-    Layout: Grid 3x4 (12 labels per page)
+    Fixed Bulk QR Generator.
+    Ensures all products are iterated and placed correctly.
     """
     pdf = FPDF(orientation='P', unit='mm', format='A4')
     pdf.set_auto_page_break(True, margin=10)
@@ -197,72 +162,68 @@ def generate_qr_labels_pdf(products):
     pdf.set_font("Arial", size=10)
     
     x_start, y_start = 10, 10
-    w, h = 60, 40 # Label size
+    w, h = 60, 40 
     margin = 5
     col, row = 0, 0
     
-    for p in products:
-        x = x_start + (col * (w + margin))
-        y = y_start + (row * (h + margin))
-        
-        # Border
-        pdf.rect(x, y, w, h)
-        
-        # Text
-        pdf.set_xy(x + 2, y + 2)
-        pdf.set_font("Arial", 'B', 8)
-        # Safe string for FPDF (latin-1)
-        safe_name = p['name'].encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(w-4, 4, f"{safe_name[:35]}", align='C')
-        
-        pdf.set_xy(x + 2, y + 10)
-        pdf.set_font("Arial", '', 7)
-        pdf.cell(w-4, 4, f"ID: {p['id']} | Cat: {p['category'][:10]}", align='C')
-        
-        # QR Code
-        qr_bytes = generate_product_qr_image(p['id'], p['name'])
-        
-        # Save temp image
-        temp_path = f"temp_qr_{p['id']}.png"
-        try:
+    # Pre-generate temp files to avoid IO race conditions
+    temp_files = []
+    
+    try:
+        for p in products:
+            x = x_start + (col * (w + margin))
+            y = y_start + (row * (h + margin))
+            
+            # Draw Border
+            pdf.rect(x, y, w, h)
+            
+            # Text
+            pdf.set_xy(x + 2, y + 2)
+            pdf.set_font("Arial", 'B', 8)
+            safe_name = p['name'].encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(w-4, 4, f"{safe_name[:35]}", align='C')
+            
+            pdf.set_xy(x + 2, y + 10)
+            pdf.set_font("Arial", '', 7)
+            pdf.cell(w-4, 4, f"ID: {p['id']} | Cat: {p['category'][:10]}", align='C')
+            
+            # Generate QR
+            qr_bytes = generate_product_qr_image(p['id'], p['name'])
+            
+            # Unique temp file
+            temp_path = f"temp_qr_{p['id']}_{random.randint(1000,9999)}.png"
             with open(temp_path, "wb") as f:
                 f.write(qr_bytes)
+            temp_files.append(temp_path)
+            
             # Place Image
             pdf.image(temp_path, x=x+20, y=y+16, w=20, h=20)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        
-        col += 1
-        if col >= 3:
-            col = 0
-            row += 1
-            if row >= 6:
-                row = 0
-                pdf.add_page()
+            
+            col += 1
+            if col >= 3:
+                col = 0
+                row += 1
+                if row >= 6:
+                    row = 0
+                    pdf.add_page()
+                    
+    finally:
+        # Cleanup
+        for tf in temp_files:
+            if os.path.exists(tf):
+                os.remove(tf)
                 
     return pdf.output(dest='S').encode('latin-1')
 
-# --- ADVANCED EXPIRY LOGIC (FEATURE #6) ---
+# --- EXPIRY LOGIC ---
 def calculate_advanced_loss_prevention(cart_items):
-    """
-    Implements Stepwise Loss Prevention Algorithm:
-    - 60-90 days left: 40% OFF
-    - 30-60 days left: 50% OFF
-    - 10-30 days left: BOGO
-    - <= 10 days left: FREE
-    
-    Returns: (total_discount, messages)
-    """
     if not cart_items: return 0.0, []
     
     today = datetime.now()
     discount = 0.0
     messages = []
     
-    # Group items by ID to handle quantity
-    item_counts = {} # {id: {item_obj, count}}
-    
+    item_counts = {}
     for item in cart_items:
         if item['id'] not in item_counts:
             item_counts[item['id']] = {'obj': item, 'count': 0}
@@ -280,57 +241,35 @@ def calculate_advanced_loss_prevention(cart_items):
             exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
             days_left = (exp_date - today).days
             
-            # --- STEPWISE LOGIC ---
             if days_left < 0:
-                # Expired: Should technically be blocked, but if in cart, ignore or warn?
-                # We won't discount it, main app logic should handle "Remove".
                 pass
-            
             elif days_left <= 10:
-                # FREE (Near Expiry)
                 item_discount = qty * item['price']
                 discount += item_discount
                 messages.append(f"CRITICAL: {item['name']} is FREE (Expires in {days_left}d)")
-                
             elif 10 < days_left <= 30:
-                # BOGO (Buy 1 Get 1 Free)
                 free_items = qty // 2
                 if free_items > 0:
                     item_discount = free_items * item['price']
                     discount += item_discount
                     messages.append(f"BOGO Applied: {item['name']} ({days_left}d left)")
-            
             elif 30 < days_left <= 60:
-                # 50% OFF
                 item_discount = qty * item['price'] * 0.50
                 discount += item_discount
                 messages.append(f"50% Clearance: {item['name']} ({days_left}d left)")
-                
             elif 60 < days_left <= 90:
-                # 40% OFF
                 item_discount = qty * item['price'] * 0.40
                 discount += item_discount
                 messages.append(f"40% Discount: {item['name']} ({days_left}d left)")
-                
         except:
             pass
             
     return discount, messages
 
 def calculate_expiry_bogo(cart_items):
-    """
-    Wrapper for backward compatibility. 
-    Calls the new advanced logic but only returns BOGO portion if isolated?
-    Actually, easiest to map it to the new function for general usage.
-    """
-    # Simply call the new function to ensure logic consistency
     return calculate_advanced_loss_prevention(cart_items)
 
 def parse_qr_input(data_str):
-    """
-    Parses simulated QR scan input.
-    Expected Format: PROD:<id>
-    """
     if not data_str: return None
     try:
         if data_str.startswith("PROD:"):
@@ -340,7 +279,6 @@ def parse_qr_input(data_str):
     return None
 
 def decode_qr_image(image_file):
-    """Decodes QR code from an image file using pyzbar. Fixes issue #2."""
     if qr_decode is None:
         return None
     try:
@@ -352,17 +290,12 @@ def decode_qr_image(image_file):
         return None
     return None
 
-# --- SOUND FEEDBACK ---
 def get_sound_html(sound_type):
-    """
-    Returns HTML string to play sound.
-    sound_type: 'success', 'error', 'click'
-    """
     if sound_type == 'success':
         src = "https://www.soundjay.com/buttons/sounds/button-3.mp3"
     elif sound_type == 'error':
         src = "https://www.soundjay.com/buttons/sounds/button-10.mp3"
-    else: # click
+    else: 
         src = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
         
     return f"""
@@ -371,7 +304,6 @@ def get_sound_html(sound_type):
     </audio>
     """
 
-# --- SECURITY & HASHING ---
 def generate_hash(data_string):
     return hashlib.sha256(data_string.encode()).hexdigest()
 
@@ -379,7 +311,7 @@ def generate_integrity_hash(txn_data):
     raw_string = f"{txn_data[0]}|{txn_data[1]}|{txn_data[2]}|{txn_data[3]}"
     return hashlib.sha256(raw_string.encode()).hexdigest()
 
-# --- DATA STRUCTURES: TRIE ---
+# --- TRIE ---
 class TrieNode:
     def __init__(self):
         self.children = {}
@@ -415,16 +347,13 @@ class Trie:
             results.extend(self._collect_words(child))
         return results
 
-# --- SEARCH ALGORITHMS ---
 def linear_search(data_list, key, value):
-    """O(n) search"""
     for item in data_list:
         if str(item.get(key)).lower() == str(value).lower():
             return item
     return None
 
 def binary_search(sorted_list, key, value):
-    """O(log n) search - List must be sorted by key"""
     low = 0
     high = len(sorted_list) - 1
     
@@ -440,7 +369,6 @@ def binary_search(sorted_list, key, value):
             return sorted_list[mid]
     return None
 
-# --- DATA STRUCTURES: QUEUE SIMULATION ---
 class POSQueueSimulator:
     def __init__(self):
         self.queue = [] 
@@ -460,7 +388,6 @@ class POSQueueSimulator:
             "throughput": num_customers / ((max(wait_times)/60) + 0.1) 
         }
 
-# --- ALGORITHM: ABC ANALYSIS ---
 def calculate_abc_analysis(df_products):
     if df_products.empty: return df_products
     
@@ -480,10 +407,12 @@ def calculate_abc_analysis(df_products):
     df['abc_class'] = df['cumulative_perc'].apply(classify)
     return df
 
-# --- ALGORITHM: SAFETY STOCK & EOQ ---
 def calculate_inventory_metrics(df_sales, df_products):
+    # FIX: Ensure sales DF excludes cancelled items before metric calc
+    if 'status' in df_sales.columns:
+        df_sales = df_sales[df_sales['status'] != 'Cancelled']
+
     metrics = []
-    
     for _, prod in df_products.iterrows():
         annual_demand = prod['sales_count'] * 12 if prod['sales_count'] > 0 else 10 
         holding_cost = prod['cost_price'] * 0.20 
@@ -501,7 +430,6 @@ def calculate_inventory_metrics(df_sales, df_products):
         })
     return pd.DataFrame(metrics)
 
-# --- ALGORITHM: FORECASTING ---
 def forecast_next_period(sales_array, window=5):
     if len(sales_array) < window:
         return np.mean(sales_array) if len(sales_array) > 0 else 0
@@ -510,7 +438,6 @@ def forecast_next_period(sales_array, window=5):
     weights = np.arange(1, len(recent) + 1)
     return np.dot(recent, weights) / weights.sum()
 
-# --- ALGORITHM: TIME-SERIES TREND ---
 def analyze_trend_slope(sales_series):
     if len(sales_series) < 2: return "Stable"
     x = np.arange(len(sales_series))
@@ -521,7 +448,6 @@ def analyze_trend_slope(sales_series):
     elif slope < -0.5: return "↘️ Decreasing"
     else: return "➡️ Stable"
 
-# --- ALGORITHM: FRAUD DETECTION ---
 def detect_fraud(cart_items, total, time_sec):
     flags = []
     qty_map = {}
@@ -538,13 +464,18 @@ def detect_fraud(cart_items, total, time_sec):
         
     return flags
 
-# --- ALGORITHM: SALES RANKING ---
 def rank_products(df_sales, df_products):
     if df_sales.empty: return pd.DataFrame()
     
+    # FIX 3: Filter out cancelled transactions for ranking
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
     import json
     all_items = []
-    for _, row in df_sales.iterrows():
+    for _, row in active_sales.iterrows():
         try:
             ids = json.loads(row['items_json'])
             all_items.extend(ids)
@@ -573,29 +504,26 @@ def rank_products(df_sales, df_products):
         
     return pd.DataFrame(ranking_data)
 
-# --- NEW: PROFIT & LOSS ANALYSIS ---
+# --- PROFIT & LOSS ANALYSIS ---
 def calculate_profit_loss(df_sales, df_products):
-    """
-    Calculates profit or loss per category and item based on sales and current cost price.
-    Returns summary dict and dataframe.
-    """
     if df_sales.empty or df_products.empty:
-        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0}, pd.DataFrame()
+        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0, "margin_percent": 0}, pd.DataFrame()
 
-    # Map Product Details
+    # FIX 3: STRICT FINANCIAL ACCURACY - Exclude Cancelled Orders
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
     prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
     
     category_pl = {}
-    item_pl = {}
     total_rev = 0
     total_cost = 0
 
-    for _, row in df_sales.iterrows():
+    for _, row in active_sales.iterrows():
         try:
             items = json.loads(row['items_json'])
-            # Logic: We assume the sales record used current price (approximation for ERP analytics)
-            # A strict accounting system would store CP at time of sale.
-            
             for pid in items:
                 if pid in prod_map:
                     p = prod_map[pid]
@@ -607,7 +535,6 @@ def calculate_profit_loss(df_sales, df_products):
                     total_rev += sp
                     total_cost += cp
                     
-                    # Category Aggregation
                     cat = p['category']
                     if cat not in category_pl:
                         category_pl[cat] = {'revenue': 0, 'cost': 0, 'profit': 0}
@@ -619,7 +546,6 @@ def calculate_profit_loss(df_sales, df_products):
 
     net_profit = total_rev - total_cost
     
-    # Format DF for charts
     pl_data = []
     for cat, metrics in category_pl.items():
         pl_data.append({
@@ -637,12 +563,7 @@ def calculate_profit_loss(df_sales, df_products):
         "margin_percent": (net_profit / total_rev * 100) if total_rev > 0 else 0
     }, pd.DataFrame(pl_data)
 
-# --- NEW: DEAD STOCK & EXPIRY RISK (FIXED LOGIC) ---
 def analyze_risk_inventory(df_products):
-    """
-    Analyzes Dead Stock (flagged) and Expiry Status.
-    Robust against 'NA' dates.
-    """
     if df_products.empty: return {}, pd.DataFrame()
     
     today = datetime.now()
@@ -654,11 +575,7 @@ def analyze_risk_inventory(df_products):
     
     for _, row in df_products.iterrows():
         status = "Safe"
-        
-        # Dead Stock Check
         is_dead = str(row.get('is_dead_stock', 'False')) == 'True'
-        
-        # Expiry Check
         exp_date_str = row.get('expiry_date')
         
         if exp_date_str and str(exp_date_str).upper() != "NA":
@@ -673,7 +590,6 @@ def analyze_risk_inventory(df_products):
                     status = "Near Expiry"
                     near_expiry_val += (row['stock'] * row['cost_price'])
             except: 
-                # Fallback if date parsing fails
                 pass
         elif str(exp_date_str).upper() == "NA":
              status = "Non-Expirable"
@@ -696,18 +612,19 @@ def analyze_risk_inventory(df_products):
         "near_expiry_risk": near_expiry_val
     }, pd.DataFrame(risk_data)
 
-# --- NEW: FINANCIAL RATIOS ---
 def calculate_financial_ratios(df_sales, df_products):
-    # Inventory Turnover = COGS / Avg Inventory Value
-    # Avg Inventory ~ Current Inventory (Simplification)
-    
     current_inv_val = (df_products['stock'] * df_products['cost_price']).sum()
     
-    # Calculate COGS from Sales
+    # FIX 3: Filter Cancelled
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
     cogs = 0
     prod_cp_map = df_products.set_index('id')['cost_price'].to_dict()
     
-    for _, row in df_sales.iterrows():
+    for _, row in active_sales.iterrows():
         try:
             items = json.loads(row['items_json'])
             for pid in items:
@@ -722,7 +639,6 @@ def calculate_financial_ratios(df_sales, df_products):
         "cogs": cogs
     }
 
-# --- BACKUP & RESTORE ---
 def backup_system():
     if not os.path.exists("backups"): os.makedirs("backups")
     fname = f"backups/inventory_backup_{int(time.time())}.db"
@@ -732,7 +648,6 @@ def backup_system():
     except Exception as e:
         return None
 
-# --- RECEIPT GENERATION ---
 class PDFReceipt(FPDF):
     def __init__(self, store_name, logo_path=None):
         super().__init__()
@@ -758,7 +673,6 @@ class PDFReceipt(FPDF):
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None):
-    # Added required fields to receipt PDF as requested in #5
     logo_path = "logo.png" if os.path.exists("logo.png") else None
     
     pdf = PDFReceipt(store_name, logo_path)
@@ -779,7 +693,6 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
         pdf.set_font("Arial", '', 10)
         pdf.cell(0, 5, f"Name: {customer.get('name', 'N/A')}", 0, 1)
         pdf.cell(0, 5, f"Mobile: {customer.get('mobile', 'N/A')}", 0, 1)
-        # Loyalty details on receipt
         if customer.get('loyalty_points'):
             pdf.cell(0, 5, f"Loyalty Balance: {customer.get('loyalty_points')} Pts", 0, 1)
 
@@ -811,11 +724,7 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     pdf.ln(5)
     pdf.set_font("Arial", '', 10)
     
-    # Tax and Discount Section
     subtotal = total
-    if tax_info:
-        pass
-
     if tax_info and tax_info.get('tax_amount', 0) > 0:
         pdf.cell(150, 6, f"GST ({tax_info['tax_percent']}%)", 0, 0, 'R')
         pdf.cell(40, 6, f"{tax_info['tax_amount']:.2f}", 1, 1, 'R')
@@ -832,7 +741,6 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     return pdf.output(dest='S').encode('latin-1')
 
 def generate_upi_qr(vpa, name, amount, note):
-    # Fix for Google Pay bank name issue (Point #7)
     if not name: name = "Merchant"
     
     params = {
@@ -841,9 +749,9 @@ def generate_upi_qr(vpa, name, amount, note):
         "am": f"{amount:.2f}", 
         "cu": "INR", 
         "tn": note,
-        "mc": "0000", # Mandatory for UPI compliance
-        "mode": "02", # Secure QR mode
-        "orgid": "000000" # Organization ID placeholder
+        "mc": "0000", 
+        "mode": "02", 
+        "orgid": "000000" 
     }
     url = f"upi://pay?{urllib.parse.urlencode(params)}"
     qr = qrcode.QRCode(box_size=10, border=4)
@@ -855,16 +763,12 @@ def generate_upi_qr(vpa, name, amount, note):
     return buf.getvalue()
 
 def validate_card(number, expiry, cvv):
-    """Validates card details using Luhn Algorithm and basic checks."""
-    # Length check
     if not number.isdigit() or not (13 <= len(number) <= 19):
         return False, "Invalid Card Number Length (13-19 digits required)"
     
-    # CVV Check
     if not cvv.isdigit() or not (3 <= len(cvv) <= 4):
         return False, "Invalid CVV (3-4 digits required)"
     
-    # Expiry Check
     try:
         if "/" not in expiry: return False, "Invalid Expiry Format (Use MM/YY)"
         exp_m, exp_y = map(int, expiry.split('/'))
@@ -874,7 +778,6 @@ def validate_card(number, expiry, cvv):
     except:
         return False, "Invalid Expiry Date"
 
-    # Luhn Algorithm
     digits = [int(d) for d in number]
     checksum = digits.pop()
     digits.reverse()
