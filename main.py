@@ -153,10 +153,11 @@ def login_view():
                     st.error(f"⛔ Terminal {term_in} is currently {t_status}. Access Blocked.")
                     return
 
+                # --- FIX: STRICT MUTEX LOCKING FOR POS TERMINALS ---
                 occupied_by = db.is_pos_occupied(term_in)
                 if occupied_by and occupied_by != user_in:
-                    st.error(f"⛔ Terminal {term_in} is currently locked by '{occupied_by}'.")
-                    st.warning("Ask Admin to force unlock if this is an error.")
+                    st.error(f"🔒 {term_in} is currently in use by another operator.")
+                    st.warning("Please choose a different terminal or wait until it is released.")
                     return
 
                 h = utils.generate_hash(pass_in)
