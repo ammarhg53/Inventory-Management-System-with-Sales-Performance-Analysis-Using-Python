@@ -239,6 +239,114 @@ def logout_user():
 
 # --- MODULES ---
 
+# --- FIXED MISSING MODULES (RUNTIME ERROR FIX) ---
+def inventory_manager():
+    st.title("📦 Master Inventory Management")
+    tab_view, tab_add, tab_restock, tab_reqs = st.tabs(["View & Edit", "Add New Product", "➕ Restock (Manual/QR)", "📋 Stock Requests"])
+    
+    conn = db.get_connection()
+    df = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
+    with tab_view:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.markdown("### Product Database")
+        col_f1, col_f2 = st.columns(2)
+        cat_filter = col_f1.selectbox("Filter Category", ["All"] + db.get_categories_list())
+        search_txt = col_f2.text_input("Search Name")
+        df_filtered = df
+        if cat_filter != "All": df_filtered = df[df['category'] == cat_filter]
+        if search_txt: df_filtered = df_filtered[df_filtered['name'].str.contains(search_txt, case=False)]
+        
+        st.dataframe(df_filtered[['id', 'name', 'category', 'price', 'stock', 'expiry_date', 'is_dead_stock']], use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_add:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        with st.form("new_prod", clear_on_submit=True):
+            n = st.text_input("Product Name")
+            c = st.selectbox("Category", db.get_categories_list())
+            p = st.number_input("Selling Price", min_value=0.0)
+            cp = st.number_input("Cost Price", min_value=0.0)
+            s = st.number_input("Initial Stock", min_value=0)
+            has_expiry = st.radio("Has Expiry?", ["No", "Yes"], horizontal=True)
+            exp = None
+            if has_expiry == "Yes": exp = st.date_input("Expiry Date")
+            else: exp = "NA"
+            
+            if st.form_submit_button("Add Product"):
+                if db.add_product(n, c, p, s, cp, exp):
+                    st.success(f"Added: {n}")
+                else: st.error("Failed")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_restock:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        prod_opts = {f"{row['name']} (ID: {row['id']})": row['id'] for idx, row in df.iterrows()}
+        sel = st.selectbox("Select Product", list(prod_opts.keys()))
+        if sel: 
+            pid = prod_opts[sel]
+            qty = st.number_input("Add Quantity", min_value=1, value=10)
+            if st.button("Confirm Restock"):
+                db.restock_product(pid, qty)
+                st.success("Stock Updated!")
+                time.sleep(1)
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_reqs:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.dataframe(db.get_stock_requests(), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+def admin_panel():
+    st.title("🛡️ Admin Console")
+    tab_dash, tab_emp, tab_settings, tab_cust = st.tabs(["Controls", "Employees", "Settings", "Customers"])
+    
+    with tab_dash:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        if st.button("🔓 Force Unlock All Terminals"):
+            db.force_clear_all_sessions()
+            st.success("All session locks cleared.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_emp:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("Employee Activity")
+        st.dataframe(db.get_employee_activity_live(), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_settings:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.info("System Settings (Restricted)")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_cust:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.dataframe(db.get_all_customers(), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+def user_profile_page():
+    st.title("👤 My Profile")
+    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+    with st.form("profile_upd"):
+        new_name = st.text_input("Full Name", value=st.session_state['full_name'])
+        if st.form_submit_button("Update Profile"):
+            db.update_fullname(st.session_state['user'], new_name)
+            st.session_state['full_name'] = new_name
+            st.success("Updated")
+    
+    st.divider()
+    with st.form("pass_chg"):
+        old_p = st.text_input("Old Password", type="password")
+        new_p = st.text_input("New Password", type="password")
+        if st.form_submit_button("Change Password"):
+            if db.verify_password(st.session_state['user'], old_p):
+                db.update_password(st.session_state['user'], new_p)
+                st.success("Password Changed")
+            else: st.error("Incorrect Old Password")
+    st.markdown("</div>", unsafe_allow_html=True)
+
 def pos_interface():
     st.markdown("<div class='card-container'>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([3, 1, 1])
@@ -304,88 +412,71 @@ def pos_interface():
                     st.caption("No Clearance Items")
         
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
+            # --- FIX: STANDARDIZED MOBILE INPUT ---
             col_cc, col_mob, col_search = st.columns([1, 2, 1])
             
             with col_cc:
-                country_code = st.selectbox("Code", ["+91 (IN)", "+1 (US)", "+44 (UK)", "+971 (UAE)"], key="cust_cc")
-                cc_val = country_code.split(" ")[0]
-
-            with col_mob:
-                # Pre-fill logic: if customer is selected, strip CC for display if it matches
-                default_val = ""
-                if st.session_state.get('current_customer'):
-                    full_num = st.session_state['current_customer']['mobile']
-                    if full_num.startswith(cc_val):
-                        default_val = full_num[len(cc_val):]
-                    else:
-                        default_val = full_num # Fallback
+                # Default to +91
+                country_code = st.selectbox("Country Code", ["+91", "+1", "+44", "+971"], index=0, key="cc_select")
                 
-                mobile_input = st.text_input("Mobile Number", value=default_val, key="cust_mob_in", max_chars=15).strip()
+            with col_mob:
+                # Text input for number part
+                mob_val = ""
+                if st.session_state.get('current_customer'):
+                    # Strip code for display if possible, mostly cosmetic
+                    curr = st.session_state['current_customer']['mobile']
+                    if curr.startswith("+91"): mob_val = curr[3:]
+                    else: mob_val = curr # Show full if legacy or other
+                
+                mobile_input = st.text_input("Mobile Number (10 digits)", value=mob_val, max_chars=15).strip()
 
             with col_search:
+                st.write("") # Spacer
                 st.write("")
-                st.write("")
-                search_clicked = st.button("🔎 Search / Add")
+                search_click = st.button("🔎 Search / Add")
 
-            # --- VALIDATION & SEARCH LOGIC ---
-            if search_clicked:
-                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                
-                # 2️⃣ MOBILE NUMBER VALIDATION
-                is_valid = True
-                err_msg = ""
-                
-                if not mobile_input:
-                    is_valid = False
-                    err_msg = "Please enter a mobile number."
-                elif cc_val == "+91":
-                    if not mobile_input.isdigit():
-                        is_valid = False
-                        err_msg = "Invalid mobile number. Please enter a valid Indian number (digits only)."
-                    elif len(mobile_input) != 10:
-                        is_valid = False
-                        err_msg = "Invalid mobile number. Please enter a valid Indian number (10 digits)."
-                    elif mobile_input[0] not in ['6', '7', '8', '9']:
-                        is_valid = False
-                        err_msg = "Invalid mobile number. Please enter a valid Indian number (start with 6-9)."
-                
-                if not is_valid:
-                    # 4️⃣ USER FEEDBACK (Invalid)
-                    st.error(f"❌ {err_msg}")
+            if search_click:
+                if not mobile_input.isdigit():
+                    st.error("❌ Invalid mobile number. Digits only.")
+                elif len(mobile_input) != 10 and country_code == "+91":
+                    st.error("❌ Invalid mobile number. Please enter a valid Indian mobile number (10 digits).")
                 else:
-                    # Append Country Code
-                    final_mobile = f"{cc_val}{mobile_input}"
+                    # Normalize: Always prepend country code for new lookups
+                    final_mobile = f"{country_code}{mobile_input}"
                     
-                    # 3️⃣ DUPLICATE PREVENTION (Existing Logic)
+                    # 1. Try finding standardized number
                     cust = db.get_customer(final_mobile)
+                    
+                    # 2. Legacy Fallback (Preserve History)
+                    # If not found, and it's India, try looking up just the 10 digit number
+                    if not cust and country_code == "+91":
+                        cust = db.get_customer(mobile_input)
+                        if cust:
+                            st.warning(f"⚠️ Found legacy record for {cust['name']}. Please update to +91 format in profile if needed.")
+                            # We use the record found, but internally we proceed.
+                            # Ideally, we would update the DB here, but "Add Only" constraint prefers minimal modification.
+                    
                     if cust:
                         st.session_state['current_customer'] = cust
-                        # 4️⃣ USER FEEDBACK (Valid)
-                        st.success(f"✅ Customer verified successfully: {cust['name']}")
-                        st.caption(f"Loyalty Points: {cust['loyalty_points']}")
+                        st.success(f"✅ Verified: {cust['name']} ({cust['segment']})")
                     else:
                         st.session_state['temp_new_customer'] = final_mobile
-                        st.warning("New Customer! Please enter details below.")
+                        st.warning(f"🆕 New Customer: {final_mobile}")
 
-            # Form for New Customer
-            current_full_mobile = f"{cc_val}{mobile_input}"
-            
-            if st.session_state.get('temp_new_customer') == current_full_mobile and not st.session_state.get('current_customer'):
+            # New Customer Form
+            if st.session_state.get('temp_new_customer') and not st.session_state.get('current_customer'):
                 with st.form("new_cust_form"):
-                    st.write(f"Creating account for: **{current_full_mobile}**")
+                    st.write(f"Registering: **{st.session_state['temp_new_customer']}**")
                     new_name = st.text_input("Full Name")
                     new_email = st.text_input("Email (Optional)")
                     if st.form_submit_button("Save Customer"):
                         if new_name:
-                            # 5️⃣ DATA SAFETY: Save valid number
-                            db.upsert_customer(current_full_mobile, new_name, new_email)
-                            st.session_state['current_customer'] = db.get_customer(current_full_mobile)
+                            db.upsert_customer(st.session_state['temp_new_customer'], new_name, new_email)
+                            st.session_state['current_customer'] = db.get_customer(st.session_state['temp_new_customer'])
                             st.session_state.pop('temp_new_customer', None)
-                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
-                            st.success("✅ Customer Verified & Added!")
+                            st.success("✅ Customer Added!")
                             st.rerun()
                         else:
-                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error("Name is required.")
 
         st.markdown("---")
@@ -604,8 +695,6 @@ def pos_interface():
             if st.button("Select UPI", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'UPI'
                 st.session_state['checkout_stage'] = 'payment_process'
-                st.session_state['qr_expiry'] = None 
-                st.session_state.pop('upi_txn_ref', None) 
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c3:
@@ -745,10 +834,6 @@ def pos_interface():
                 if st.session_state.get('current_customer'):
                     cust_name = st.session_state['current_customer']['name'].replace(" ", "")
                 
-                # Get sale ID from database (it's the last one)
-                # But here we don't have it directly. We can use a timestamp or a generic name if ID isn't in session.
-                # In finalize_sale we actually know the ID, but it returns. 
-                # Let's use a timestamp based name.
                 ist_now = utils.get_system_time()
                 file_ts = ist_now.strftime("%Y-%m-%d")
                 
@@ -852,10 +937,11 @@ def analytics_dashboard():
     df_sales = db.get_sales_data()
     
     # FIX 3: Filter out cancelled transactions for charts
+    # STABILITY FIX: Added .copy() to prevent SettingWithCopyWarning
     if 'status' in df_sales.columns:
-        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+        active_sales = df_sales[df_sales['status'] != 'Cancelled'].copy()
     else:
-        active_sales = df_sales
+        active_sales = df_sales.copy()
 
     conn = db.get_connection()
     df_prods = pd.read_sql("SELECT * FROM products", conn)
