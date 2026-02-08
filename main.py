@@ -1161,44 +1161,51 @@ def admin_panel():
         
         st.markdown("---")
         
-        # FIX 7: UI for Cancellation Reason
-        c_undo, c_redo = st.columns(2)
+        # FIX 7: UI for Cancellation with Password & Search
+        st.subheader("🚫 Order Cancellation & Reversal")
+        
+        c_undo, c_search = st.columns(2)
+        
         with c_undo:
+            st.markdown("#### ↩️ Undo Last My Sale")
             if st.session_state['undo_stack']:
                 last_sale_id = st.session_state['undo_stack'][-1]
-                st.warning(f"Ready to undo Sale ID: #{last_sale_id}")
+                st.warning(f"Target: Sale ID #{last_sale_id}")
                 
-                reason = st.text_input("Cancellation Reason", key="cancel_reason")
-                if st.button("↩️ Undo Last Sale"):
-                    if not reason:
-                        st.error("Reason Required")
-                    else:
-                        success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'], st.session_state['role'], reason)
+                with st.form("undo_last_form"):
+                    u_reason = st.text_input("Cancellation Reason", placeholder="Reason is mandatory...")
+                    u_pass = st.text_input("Confirm Password", type="password")
+                    if st.form_submit_button("Confirm Undo"):
+                        success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'], st.session_state['role'], u_reason, u_pass)
                         if success:
                             st.session_state['redo_stack'].append(st.session_state['undo_stack'].pop())
                             st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
-                            st.success(f"Order #{last_sale_id} cancelled successfully.")
-                            time.sleep(1)
+                            st.success(msg)
+                            time.sleep(1.5)
                             st.rerun()
                         else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error(f"Failed: {msg}")
-            else: st.info("No recent transactions to undo.")
+            else: st.info("No recent transactions in this session.")
         
-        with c_redo:
-            if st.session_state['redo_stack']:
-                last_undo_id = st.session_state['redo_stack'][-1]
-                st.info(f"Ready to Redo Sale ID: #{last_undo_id}")
-                if st.button("↪️ Redo Cancelled Sale"):
-                    success, msg = db.redo_sale_transaction(last_undo_id, st.session_state['user'])
-                    if success:
-                        st.session_state['undo_stack'].append(st.session_state['redo_stack'].pop())
-                        st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
-                        st.success(f"Order #{last_undo_id} restored.")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error(f"Failed: {msg}")
-            else: st.info("No actions to redo.")
+        with c_search:
+            # New Feature: Search & Cancel for Managers/Admins
+            st.markdown("#### 🔎 Search & Cancel (Manager/Admin)")
+            if st.session_state['role'] in ['Manager', 'Admin']:
+                with st.form("search_cancel_form"):
+                    sc_id = st.number_input("Enter Sale ID", min_value=1, step=1)
+                    sc_reason = st.text_input("Cancellation Reason")
+                    sc_pass = st.text_input("Confirm Password", type="password")
+                    if st.form_submit_button("Search & Cancel"):
+                        success, msg = db.cancel_sale_transaction(sc_id, st.session_state['user'], st.session_state['role'], sc_reason, sc_pass)
+                        if success:
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                            st.success(msg)
+                        else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                            st.error(msg)
+            else:
+                st.info("Permission Restricted to Managers & Admins.")
 
         st.markdown("---")
         if st.button("Create System Backup"):
@@ -1528,9 +1535,9 @@ def admin_panel():
         # Cancellation Log Section - Visible to Admin/Manager
         if st.session_state['role'] in ['Admin', 'Manager']:
             st.markdown("#### 🚫 Cancelled Orders Audit")
-            cancel_logs = logs[logs['action'] == 'Undo Sale']
-            if not cancel_logs.empty:
-                st.dataframe(cancel_logs, use_container_width=True)
+            cancel_audit = db.get_cancellation_audit_log()
+            if not cancel_audit.empty:
+                st.dataframe(cancel_audit, use_container_width=True)
             else:
                 st.info("No cancellation events recorded.")
             
