@@ -36,29 +36,10 @@ except (ImportError, OSError):
     tk = None
     ImageTk = None
 
-# --- SYSTEM TIME HELPER (IST ENFORCEMENT) ---
+# --- SYSTEM TIME HELPER ---
 def get_system_time():
-    """
-    Returns current system time in Indian Standard Time (IST).
-    Algorithm: UTC + 5 hours 30 minutes.
-    Used for: Consistent timestamping across sales, logs, and receipts.
-    """
-    return datetime.utcnow() + timedelta(hours=5, minutes=30)
-
-# --- FINANCIAL DATA VALIDATION (CRITICAL FIX) ---
-def safe_float(value):
-    """
-    Safely converts strings/inputs to float to prevent large amount crashes.
-    Handles '10,00,000' format and UTF-8 encoding issues.
-    """
-    try:
-        if isinstance(value, str):
-            # Remove commas often found in Indian numbering system
-            clean_val = value.replace(",", "").strip()
-            return float(clean_val)
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
+    """Returns current system time. Useful for centralized time sync."""
+    return datetime.now()
 
 # --- SECURITY: PASSWORD STRENGTH ---
 def check_password_strength(password):
@@ -720,13 +701,6 @@ class PDFReceipt(FPDF):
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None, new_coupon=None):
-    """
-    Generates a production-grade PDF receipt using FPDF.
-    
-    CRITICAL FIX: 
-    - Encodes strings to 'latin-1' to prevent UTF-8 crashes with currency symbols.
-    - Includes Payment Mode, Operator, and POS ID as per audit requirements.
-    """
     logo_path = "logo.png" if os.path.exists("logo.png") else None
     
     pdf = PDFReceipt(store_name, logo_path)
@@ -734,28 +708,24 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     
     pdf.set_font("Arial", size=10)
     
-    # Header Info (Audit Trail)
     pdf.cell(100, 6, f"Receipt No: #{txn_id}", 0, 0)
     pdf.cell(0, 6, f"Date: {time_str}", 0, 1, 'R')
     pdf.cell(100, 6, f"Cashier: {operator}", 0, 0)
-    pdf.cell(0, 6, f"POS ID: {pos}", 0, 1, 'R')
-    pdf.cell(100, 6, f"Payment: {mode}", 0, 1, 'L')
+    pdf.cell(0, 6, f"POS: {pos}", 0, 1, 'R')
+    pdf.cell(100, 6, f"Payment Mode: {mode}", 0, 1, 'L')
     
     if customer:
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(0, 6, "Customer Details:", 0, 1, 'L')
         pdf.set_font("Arial", '', 10)
-        # Safe Encode
-        safe_cust_name = customer.get('name', 'N/A').encode('latin-1', 'replace').decode('latin-1')
-        pdf.cell(0, 5, f"Name: {safe_cust_name}", 0, 1)
+        pdf.cell(0, 5, f"Name: {customer.get('name', 'N/A')}", 0, 1)
         pdf.cell(0, 5, f"Mobile: {customer.get('mobile', 'N/A')}", 0, 1)
         if customer.get('loyalty_points'):
             pdf.cell(0, 5, f"Loyalty Balance: {customer.get('loyalty_points')} Pts", 0, 1)
 
     pdf.ln(5)
     
-    # Table Header
     pdf.set_fill_color(220, 220, 220)
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(100, 8, "Item", 1, 0, 'L', True)
@@ -773,7 +743,6 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
             item_summary[i['name']] = {'price': i['price'], 'qty': 1, 'total': i['price']}
             
     for name, data in item_summary.items():
-        # ENCODING SAFETY FIX: Replace currency symbols and ensure latin-1 compliance
         sanitized_name = name.encode('latin-1', 'replace').decode('latin-1')
         pdf.cell(100, 7, sanitized_name, 1)
         pdf.cell(30, 7, f"{data['price']:.2f}", 1, 0, 'C')
@@ -783,15 +752,14 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     pdf.ln(5)
     pdf.set_font("Arial", '', 10)
     
-    # Totals Section
+    subtotal = total
     if tax_info and tax_info.get('tax_amount', 0) > 0:
         pdf.cell(150, 6, f"GST ({tax_info['tax_percent']}%)", 0, 0, 'R')
         pdf.cell(40, 6, f"{tax_info['tax_amount']:.2f}", 1, 1, 'R')
 
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(150, 8, "NET TOTAL", 0, 0, 'R')
-    # Use 'Rs' instead of symbol to avoid encoding crash
-    pdf.cell(40, 8, f"Rs {total:,.2f}", 1, 1, 'R')
+    pdf.cell(40, 8, f"Rs {total:.2f}", 1, 1, 'R')
     
     pdf.set_font("Arial", '', 9)
     pdf.ln(10)
