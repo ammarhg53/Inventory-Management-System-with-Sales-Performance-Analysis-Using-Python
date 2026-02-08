@@ -272,32 +272,50 @@ def pos_interface():
                     st.caption("No Clearance Items")
         
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
-            col_c1, col_c2 = st.columns([2, 1])
-            with col_c1:
-                cust_phone = st.text_input("Customer Mobile", value=st.session_state['current_customer']['mobile'] if st.session_state['current_customer'] else "").strip()
-            with col_c2:
+            # --- FIX: CUSTOMER MOBILE VALIDATION (+91) ---
+            col_cc, col_mob, col_btn = st.columns([1, 2, 1])
+            with col_cc:
+                country_code = st.selectbox("Code", ["+91"], disabled=True, key="cc_fixed")
+            with col_mob:
+                cust_phone_input = st.text_input("Customer Mobile (10 Digits)", max_chars=10).strip()
+            with col_btn:
                 st.write("")
                 st.write("")
                 if st.button("🔎 Search / Add"):
-                    st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                    if cust_phone:
-                        cust = db.get_customer(cust_phone)
+                    if not cust_phone_input.isdigit() or len(cust_phone_input) != 10:
+                        st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                        st.error("Invalid Mobile: Must be exactly 10 digits.")
+                    else:
+                        st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
+                        normalized_phone = f"{country_code}{cust_phone_input}"
+                        
+                        # Search Normalized first
+                        cust = db.get_customer(normalized_phone)
+                        # Fallback to legacy search (non-normalized)
+                        if not cust:
+                            cust = db.get_customer(cust_phone_input)
+                            if cust:
+                                st.info("Found legacy record. Proceeding with existing data.")
+                        
                         if cust:
                             st.session_state['current_customer'] = cust
                             st.success(f"Welcome back, {cust['name']} ({cust['segment']} Member)")
                             st.caption(f"Loyalty Points: {cust['loyalty_points']}")
                         else:
-                            st.session_state['temp_new_customer'] = cust_phone
-                            st.warning("New Customer! Please enter details below.")
+                            st.session_state['temp_new_customer'] = normalized_phone
+                            st.warning(f"New Customer: {normalized_phone}")
             
-            if st.session_state.get('temp_new_customer') == cust_phone and not st.session_state['current_customer']:
+            # Show form if new customer
+            if st.session_state.get('temp_new_customer') and not st.session_state.get('current_customer'):
+                st.write(f"Registering: **{st.session_state['temp_new_customer']}**")
                 with st.form("new_cust_form"):
                     new_name = st.text_input("Full Name")
                     new_email = st.text_input("Email (Optional)")
                     if st.form_submit_button("Save Customer"):
                         if new_name:
-                            db.upsert_customer(cust_phone, new_name, new_email)
-                            st.session_state['current_customer'] = db.get_customer(cust_phone)
+                            # Save with normalized phone
+                            db.upsert_customer(st.session_state['temp_new_customer'], new_name, new_email)
+                            st.session_state['current_customer'] = db.get_customer(st.session_state['temp_new_customer'])
                             st.session_state.pop('temp_new_customer', None)
                             st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
                             st.success("Customer Added!")
@@ -305,6 +323,10 @@ def pos_interface():
                         else:
                             st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error("Name is required.")
+            
+            # Show current selection
+            if st.session_state.get('current_customer'):
+                st.info(f"Selected: {st.session_state['current_customer']['name']} ({st.session_state['current_customer']['mobile']})")
 
         st.markdown("---")
         col_scan, col_manual = st.columns([1, 2])
@@ -484,20 +506,37 @@ def pos_interface():
                         st.rerun()
                 
                 with c_pay:
-                    if st.button("💳 Proceed to Pay", type="primary", use_container_width=True):
-                        if not st.session_state['current_customer']:
-                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
-                            st.error("Please add Customer Details first!")
-                        else:
-                            st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                            st.session_state['final_calc'] = {
-                                "total": final_total, 
-                                "tax": tax_amount, 
-                                "discount": discount + fest_disc + loss_discount,
-                                "points": st.session_state['points_to_redeem']
-                            }
-                            st.session_state['checkout_stage'] = 'payment_method'
-                            st.rerun()
+                    # --- FIX: ZERO AMOUNT PAYMENT LOGIC ---
+                    if final_total <= 0:
+                        st.warning("✨ Zero Payment Due")
+                        if st.button("✅ Confirm Zero Payment", type="primary", use_container_width=True):
+                            if not st.session_state['current_customer']:
+                                st.error("Customer details required.")
+                            else:
+                                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
+                                st.session_state['final_calc'] = {
+                                    "total": final_total, 
+                                    "tax": tax_amount, 
+                                    "discount": discount + fest_disc + loss_discount,
+                                    "points": st.session_state['points_to_redeem']
+                                }
+                                st.session_state['selected_payment_mode'] = "Loyalty/Coupon"
+                                finalize_sale(0, "Loyalty/Coupon")
+                    else:
+                        if st.button("💳 Proceed to Pay", type="primary", use_container_width=True):
+                            if not st.session_state['current_customer']:
+                                st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                                st.error("Please add Customer Details first!")
+                            else:
+                                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
+                                st.session_state['final_calc'] = {
+                                    "total": final_total, 
+                                    "tax": tax_amount, 
+                                    "discount": discount + fest_disc + loss_discount,
+                                    "points": st.session_state['points_to_redeem']
+                                }
+                                st.session_state['checkout_stage'] = 'payment_method'
+                                st.rerun()
             else:
                 st.info("Cart is empty")
                 st.button("Proceed to Pay", disabled=True)
@@ -950,17 +989,18 @@ def analytics_dashboard():
             st.info("No sales data available for breakdown.")
 
         st.markdown("---")
-        st.subheader("💰 Profit & Loss Statement")
+        st.subheader("💰 Profit & Loss Statement (Enhanced)")
+        # Calculate with new marketing expense logic
         pl_summary, pl_df = utils.calculate_profit_loss(df_sales, df_prods) # Function handles filtering
         ratios = utils.calculate_financial_ratios(df_sales, df_prods)
         
         c_pl1, c_pl2, c_pl3, c_pl4 = st.columns(4)
-        c_pl1.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}", delta=f"{pl_summary['margin_percent']:.1f}% Margin")
-        c_pl2.metric("Total COGS", f"{currency}{pl_summary['total_cost']:,.2f}", help="Cost of Goods Sold")
-        c_pl3.metric("Inventory Turnover", f"{ratios['inventory_turnover_ratio']}x", help="Higher is better")
-        c_pl4.metric("Inventory Valuation", f"{currency}{ratios['inventory_valuation']:,.0f}")
+        c_pl1.metric("Gross Revenue", f"{currency}{pl_summary['total_revenue']:,.2f}", help="Total Sales Value (List Price)")
+        c_pl2.metric("Marketing Expense", f"{currency}{pl_summary['marketing_expense']:,.2f}", help="Discounts + Loyalty", delta_color="inverse")
+        c_pl3.metric("Net Revenue", f"{currency}{pl_summary['net_revenue']:,.2f}", help="Actual Collected Amount")
+        c_pl4.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}", delta=f"{pl_summary['margin_percent']:.1f}% Margin")
         
-        st.markdown("#### Category-wise Profitability")
+        st.markdown("#### Category-wise Gross Profitability")
         if not pl_df.empty:
             st.bar_chart(pl_df.set_index('Category')['Profit'])
             st.dataframe(pl_df.style.format({"Revenue": "{:,.2f}", "Cost": "{:,.2f}", "Profit": "{:,.2f}", "Margin %": "{:.1f}%"}), use_container_width=True)
