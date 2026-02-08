@@ -1,1185 +1,889 @@
-import sqlite3
-import pandas as pd
-import random
-from datetime import datetime, timedelta
 import hashlib
-import json
+import time
+import math
+import random
+import pandas as pd
+import numpy as np
+import qrcode
+from io import BytesIO
+from fpdf import FPDF
+import urllib.parse
+from datetime import datetime, timedelta
+import shutil
 import os
+import json
+from PIL import Image
+import re
 
-# --- POINT 6: FREE DATABASE CONNECTION GUIDANCE ---
-# This system uses SQLite (inventory_system.db) by default.
-# SQLite is a serverless, file-based database engine that is:
-# 1. FREE and requires no setup.
-# 2. Native to Python (no pip install needed).
-# 3. Thread-safe for local development and demos.
-#
-# For Multi-Terminal / Multi-POS Simulation:
-# - SQLite handles concurrent read/writes using file locking.
-# - To simulate multiple POS terminals, open the app in multiple browser tabs/windows.
-# - Each tab acts as a separate "Terminal" session sharing this DB.
-#
-# For Production Deployment:
-# - Replace get_connection() to return a psycopg2 connection (PostgreSQL).
-# - Example: return psycopg2.connect(os.environ["DATABASE_URL"])
-DB_NAME = "inventory_system.db"
+# --- CONDITIONAL IMPORT FOR OPENCV (CLOUD COMPATIBILITY) ---
+try:
+    import cv2
+except (ImportError, OSError):
+    cv2 = None
 
-def get_connection():
-    """Returns a connection to the SQLite database."""
-    return sqlite3.connect(DB_NAME, check_same_thread=False, timeout=30)
+# --- FIX 1: ROBUST PYZBAR IMPORT ---
+# Catch OSError which happens when libzbar0 is missing on Linux
+try:
+    from pyzbar.pyzbar import decode as qr_decode
+except (ImportError, OSError):
+    qr_decode = None
 
-def init_db():
-    """Initializes the database, tables, and seeds default data."""
-    conn = get_connection()
-    c = conn.cursor()
+# --- CONDITIONAL IMPORT FOR TKINTER ---
+try:
+    import tkinter as tk
+    from PIL import ImageTk
+except (ImportError, OSError):
+    tk = None
+    ImageTk = None
+
+# --- SYSTEM TIME HELPER (IST ENFORCEMENT) ---
+def get_system_time():
+    """
+    Returns current system time in Indian Standard Time (IST).
+    Algorithm: UTC + 5 hours 30 minutes.
+    Used for: Consistent timestamping across sales, logs, and receipts.
+    """
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+# --- FINANCIAL DATA VALIDATION (CRITICAL FIX) ---
+def safe_float(value):
+    """
+    Safely converts strings/inputs to float to prevent large amount crashes.
+    Handles '10,00,000' format and UTF-8 encoding issues.
+    """
+    try:
+        if isinstance(value, str):
+            # Remove commas often found in Indian numbering system
+            clean_val = value.replace(",", "").strip()
+            return float(clean_val)
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+# --- SECURITY: PASSWORD STRENGTH ---
+def check_password_strength(password):
+    """
+    Validates password strength.
+    Returns: (score [0-4], label, color)
+    """
+    score = 0
+    if len(password) >= 8: score += 1
+    if re.search(r"[A-Z]", password): score += 1
+    if re.search(r"[a-z]", password): score += 1
+    if re.search(r"\d", password) or re.search(r"[ !@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]", password): score += 1
     
-    c.execute('''CREATE TABLE IF NOT EXISTS products
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  name TEXT NOT NULL, 
-                  category TEXT, 
-                  price REAL, 
-                  stock INTEGER, 
-                  cost_price REAL, 
-                  sales_count INTEGER DEFAULT 0,
-                  last_restock_date TEXT,
-                  expiry_date TEXT,
-                  is_dead_stock TEXT DEFAULT 'False',
-                  image_data BLOB)''')
+    if score == 0: return 0, "Very Weak", "#ef4444"
+    elif score == 1: return 1, "Weak", "#ef4444"
+    elif score == 2: return 2, "Medium", "#f59e0b"
+    elif score == 3: return 3, "Strong", "#10b981"
+    elif score == 4: return 4, "Very Strong", "#059669"
+    return 0, "Unknown", "#ef4444"
+
+# --- REAL-TIME LIVE SCANNER ---
+class LiveBarcodeScanner:
+    def __init__(self):
+        self.detected_code = None
+        self.cap = None
+        self.root = None
+        self.panel = None
+
+    def start_scanner(self):
+        if tk is None or cv2 is None:
+            return None
+
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            return None, "Error: Could not access camera."
+
+        self.root = tk.Tk()
+        self.root.title("POS Live Scanner - Point at Barcode")
+        self.root.geometry("640x520")
+        self.root.resizable(False, False)
+        
+        lbl_instruct = tk.Label(self.root, text="Scanning... Hold product steady.", font=("Arial", 12), bg="black", fg="white")
+        lbl_instruct.pack(fill=tk.X)
+        
+        self.panel = tk.Label(self.root)
+        self.panel.pack(padx=10, pady=10)
+        
+        btn_cancel = tk.Button(self.root, text="Cancel Scan", command=self.close_scanner, bg="#ef4444", fg="white", font=("Arial", 10, "bold"))
+        btn_cancel.pack(pady=5)
+
+        self.video_loop()
+        self.root.protocol("WM_DELETE_WINDOW", self.close_scanner)
+        self.root.mainloop()
+        
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+            
+        return self.detected_code
+
+    def video_loop(self):
+        if self.detected_code: return
+
+        ret, frame = self.cap.read()
+        if ret:
+            decoded_objects = qr_decode(frame)
+            for obj in decoded_objects:
+                points = obj.polygon
+                if len(points) == 4:
+                    pts = np.array(points, dtype=np.int32)
+                    cv2.polylines(frame, [pts], True, (0, 255, 0), 3)
+                
+                raw_data = obj.data.decode("utf-8")
+                self.detected_code = raw_data
+                self.root.after(500, self.close_scanner)
+                
+            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            img = Image.fromarray(cv2image)
+            if ImageTk:
+                imgtk = ImageTk.PhotoImage(image=img)
+                self.panel.imgtk = imgtk
+                self.panel.config(image=imgtk)
+            
+            self.root.after(10, self.video_loop)
+        else:
+            self.close_scanner()
+
+    def close_scanner(self):
+        if self.root:
+            self.root.quit()
+            self.root.destroy()
+            self.root = None
+
+def run_live_scan():
+    if qr_decode is None:
+        return None, "Error: pyzbar library not installed (missing libzbar0)."
     
-    # FIX 4 & 7: Added cancellation_reason, cancelled_by, cancellation_timestamp
-    c.execute('''CREATE TABLE IF NOT EXISTS sales
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  timestamp TEXT, 
-                  total_amount REAL, 
-                  items_json TEXT, 
-                  integrity_hash TEXT, 
-                  operator TEXT, 
-                  payment_mode TEXT, 
-                  status TEXT DEFAULT 'Completed', 
-                  time_taken REAL DEFAULT 0, 
-                  pos_id TEXT DEFAULT 'POS-1',
-                  customer_mobile TEXT,
-                  tax_amount REAL DEFAULT 0.0,
-                  discount_amount REAL DEFAULT 0.0,
-                  coupon_applied TEXT,
-                  points_redeemed INTEGER DEFAULT 0,
-                  cancellation_reason TEXT,
-                  cancelled_by TEXT,
-                  cancellation_timestamp TEXT)''')
+    if tk is None:
+        return None, "⚠️ Live camera scanning is disabled in Cloud Runtime (Tkinter missing). Use manual entry."
     
-    c.execute('''CREATE TABLE IF NOT EXISTS system_settings
-                 (key TEXT PRIMARY KEY, value TEXT)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS categories
-                 (name TEXT PRIMARY KEY)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (username TEXT PRIMARY KEY, 
-                  password_hash TEXT, 
-                  role TEXT, 
-                  full_name TEXT,
-                  status TEXT DEFAULT 'Active')''')
-                 
-    c.execute('''CREATE TABLE IF NOT EXISTS logs
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, 
-                  user TEXT, action TEXT, details TEXT)''')
-                  
-    c.execute('''CREATE TABLE IF NOT EXISTS active_sessions
-                 (pos_id TEXT PRIMARY KEY, username TEXT, login_time TEXT, role TEXT)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS customers
-                 (mobile TEXT PRIMARY KEY, 
-                  name TEXT, 
-                  email TEXT, 
-                  visits INTEGER DEFAULT 0, 
-                  total_spend REAL DEFAULT 0.0,
-                  loyalty_points INTEGER DEFAULT 0,
-                  segment TEXT DEFAULT 'New')''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS terminals
-                 (id TEXT PRIMARY KEY, 
-                  name TEXT, 
-                  location TEXT, 
-                  status TEXT DEFAULT 'Active')''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS stock_requests
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  product_id INTEGER, 
-                  product_name TEXT, 
-                  quantity INTEGER, 
-                  notes TEXT, 
-                  status TEXT DEFAULT 'Pending', 
-                  requested_by TEXT, 
-                  timestamp TEXT)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS coupons
-                 (code TEXT PRIMARY KEY, 
-                  discount_type TEXT, 
-                  value REAL, 
-                  min_bill REAL, 
-                  valid_until TEXT, 
-                  usage_limit INTEGER, 
-                  used_count INTEGER DEFAULT 0,
-                  bound_mobile TEXT)''')
-
-    c.execute('''CREATE TABLE IF NOT EXISTS campaigns
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  name TEXT, 
-                  type TEXT, 
-                  start_time TEXT, 
-                  end_time TEXT, 
-                  config_json TEXT,
-                  is_active TEXT DEFAULT 'True')''')
+    if cv2 is None:
+        return None, "⚠️ Live camera scanning is disabled (OpenCV libGL missing). Use manual entry."
     
-    c.execute('''CREATE TABLE IF NOT EXISTS lucky_draws
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  draw_date TEXT, 
-                  winner_name TEXT, 
-                  winner_mobile TEXT, 
-                  prize TEXT, 
-                  criteria TEXT)''')
+    scanner = LiveBarcodeScanner()
+    try:
+        code = scanner.start_scanner()
+        if code:
+            return code, "Success"
+        else:
+            return None, "Scan cancelled or no code found."
+    except Exception as e:
+        return None, f"Scanner Error: {str(e)}"
 
-    # --- MIGRATIONS ---
-    try: c.execute("ALTER TABLE products ADD COLUMN last_restock_date TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN pos_id TEXT DEFAULT 'POS-1'")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN customer_mobile TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN tax_amount REAL DEFAULT 0.0")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN discount_amount REAL DEFAULT 0.0")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN coupon_applied TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN points_redeemed INTEGER DEFAULT 0")
-    except: pass
-    try: c.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'Active'")
-    except: pass
-    try: c.execute("ALTER TABLE customers ADD COLUMN loyalty_points INTEGER DEFAULT 0")
-    except: pass
-    try: c.execute("ALTER TABLE customers ADD COLUMN segment TEXT DEFAULT 'New'")
-    except: pass
-    try: c.execute("ALTER TABLE products ADD COLUMN expiry_date TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE products ADD COLUMN is_dead_stock TEXT DEFAULT 'False'")
-    except: pass
-    try: c.execute("ALTER TABLE products ADD COLUMN image_data BLOB")
-    except: pass
+# --- LOYALTY ---
+def calculate_loyalty_points(amount):
+    return int(amount // 100)
+
+# --- RECOMMENDATION ---
+def get_personalized_offer(customer, product_df):
+    if not customer: return "Scan customer to see offers."
+    if not product_df.empty:
+        cats = product_df['category'].unique()
+        fav_cat = random.choice(cats)
+        return f"🌟 Special for you: 10% OFF on all {fav_cat} today!"
+    return "Check out our new arrivals!"
+
+# --- QR GENERATION ---
+def generate_product_qr_image(product_id, product_name):
+    data = f"PROD:{product_id}"
+    qr = qrcode.QRCode(box_size=10, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf)
+    return buf.getvalue()
+
+def generate_qr_labels_pdf(products):
+    """
+    Fixed Bulk QR Generator.
+    Ensures all products are iterated and placed correctly.
+    """
+    pdf = FPDF(orientation='P', unit='mm', format='A4')
+    pdf.set_auto_page_break(True, margin=10)
+    pdf.add_page()
+    pdf.set_font("Arial", size=10)
     
-    # FIX 4 & 7: Cancellation Columns
-    try: c.execute("ALTER TABLE sales ADD COLUMN cancellation_reason TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN cancelled_by TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE sales ADD COLUMN cancellation_timestamp TEXT")
-    except: pass
+    x_start, y_start = 10, 10
+    w, h = 60, 40 
+    margin = 5
+    col, row = 0, 0
     
-    # FIX: Coupon Binding
-    try: c.execute("ALTER TABLE coupons ADD COLUMN bound_mobile TEXT")
-    except: pass
-
-    # REMOVED: c.execute("DELETE FROM active_sessions") to allow persistent locks
-
-    defaults = {
-        "store_name": "SmartInventory Enterprise",
-        "upi_id": "merchant@okaxis",
-        "currency_symbol": "₹",
-        "tax_rate": "18",
-        "gst_enabled": "False",
-        "default_bill_mode": "Non-GST"
-    }
-    for k, v in defaults.items():
-        c.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)", (k, v))
-
-    default_cats = ["Electronics", "Groceries", "Beverages", "Fashion", "Stationery", "Health"]
-    for cat in default_cats:
-        c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
-
-    users = [
-        ('ammar_admin', 'admin123', 'Admin', 'Ammar Admin'),
-        ('manager_1', 'manager123', 'Manager', 'Store Manager'),
-        ('inv_man', 'inv123', 'Inventory Manager', 'Logistics Head'),
-        ('pos_op_1', 'pos123', 'Operator', 'Counter Staff 1'),
-        ('pos_op_2', 'pos123', 'Operator', 'Counter Staff 2')
-    ]
-    for u, p, r, n in users:
-        ph = hashlib.sha256(p.encode()).hexdigest()
-        c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
-
-    c.execute("SELECT count(*) FROM products")
-    if c.fetchone()[0] == 0:
-        products = [
-            ('Gaming Laptop', 'Electronics', 85000.00, 5, 70000.00),
-            ('Wireless Mouse', 'Electronics', 650.00, 45, 300.00),
-            ('Mech Keyboard', 'Electronics', 3500.00, 20, 2000.00),
-            ('Premium Tea', 'Beverages', 450.00, 100, 200.00),
-            ('Notebook Set', 'Stationery', 120.00, 200, 50.00),
-        ]
+    # Pre-generate temp files to avoid IO race conditions
+    temp_files = []
+    
+    try:
         for p in products:
-            c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date) VALUES (?, ?, ?, ?, ?, ?)", 
-                      (p[0], p[1], p[2], p[3], p[4], datetime.now().strftime("%Y-%m-%d")))
-
-    terminals = [
-        ('POS-1', 'Main Counter', 'Entrance', 'Active'),
-        ('POS-2', 'Drive Thru', 'Side Window', 'Active'),
-        ('Office Dashboard', 'Back Office', 'HQ', 'Active')
-    ]
-    for t_id, t_name, t_loc, t_stat in terminals:
-        c.execute("INSERT OR IGNORE INTO terminals (id, name, location, status) VALUES (?, ?, ?, ?)", (t_id, t_name, t_loc, t_stat))
-
-    conn.commit()
-    conn.close()
-
-def get_setting(key):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT value FROM system_settings WHERE key=?", (key,))
-    res = c.fetchone()
-    conn.close()
-    return res[0] if res else None
-
-def set_setting(key, value):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    conn.close()
-
-def log_activity(user, action, details):
-    # NOTE: Timestamps here will rely on local server time unless utils.get_system_time() is passed in 'timestamp' arg.
-    # In main.py, we typically format the time before passing here, or this function uses local now.
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user, action, details))
-    conn.commit()
-    conn.close()
-
-def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer_mobile, 
-                             tax_amount, discount_amount, coupon_code, points_redeemed, 
-                             points_earned, integrity_hash, time_taken):
-    """
-    Records a sale transaction.
-    Atomic Updates:
-    1. Inventory decrement
-    2. Coupon usage
-    3. Sale record insertion
-    4. Customer loyalty & spend update (CLV logic)
-    """
-    conn = get_connection()
-    c = conn.cursor()
-    sale_id = None
-    try:
-        for item in cart_items:
-            c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item['id'],))
-        
-        if coupon_code:
-            c.execute("UPDATE coupons SET used_count = used_count + 1 WHERE code=?", (coupon_code,))
-
-        items_json = json.dumps([i['id'] for i in cart_items])
-        
-        # NOTE: Time here relies on system time. For IST, ensure system timezone is set or pass IST from main.py
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
-                     operator, payment_mode, time_taken, pos_id, customer_mobile, 
-                     tax_amount, discount_amount, coupon_applied, points_redeemed) 
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (timestamp, total, items_json, integrity_hash, operator, mode, time_taken, 
-                 pos_id, customer_mobile, tax_amount, discount_amount, coupon_code, points_redeemed))
-        sale_id = c.lastrowid
-
-        if customer_mobile:
-            customer_mobile = customer_mobile.strip()
-            c.execute("SELECT total_spend, loyalty_points FROM customers WHERE mobile=?", (customer_mobile,))
-            res = c.fetchone()
-            if res:
-                curr_spend, curr_points = res
-                new_spend = curr_spend + total
-                
-                # CLV Segmentation Logic
-                new_seg = "New"
-                if new_spend > 50000: new_seg = "High-Value"
-                elif new_spend > 10000: new_seg = "Regular"
-                else: new_seg = "Occasional"
-                
-                new_points = curr_points + points_earned - points_redeemed
-                c.execute("""UPDATE customers SET visits = visits + 1, total_spend = ?, 
-                             loyalty_points = ?, segment = ? WHERE mobile=?""", 
-                          (new_spend, new_points, new_seg, customer_mobile))
-
-        conn.commit()
-        return sale_id
-    except Exception as e:
-        conn.rollback()
-        raise e
+            x = x_start + (col * (w + margin))
+            y = y_start + (row * (h + margin))
+            
+            # Draw Border
+            pdf.rect(x, y, w, h)
+            
+            # Text
+            pdf.set_xy(x + 2, y + 2)
+            pdf.set_font("Arial", 'B', 8)
+            safe_name = p['name'].encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(w-4, 4, f"{safe_name[:35]}", align='C')
+            
+            pdf.set_xy(x + 2, y + 10)
+            pdf.set_font("Arial", '', 7)
+            pdf.cell(w-4, 4, f"ID: {p['id']} | Cat: {p['category'][:10]}", align='C')
+            
+            # Generate QR
+            qr_bytes = generate_product_qr_image(p['id'], p['name'])
+            
+            # Unique temp file
+            temp_path = f"temp_qr_{p['id']}_{random.randint(1000,9999)}.png"
+            with open(temp_path, "wb") as f:
+                f.write(qr_bytes)
+            temp_files.append(temp_path)
+            
+            # Place Image
+            pdf.image(temp_path, x=x+20, y=y+16, w=20, h=20)
+            
+            col += 1
+            if col >= 3:
+                col = 0
+                row += 1
+                if row >= 6:
+                    row = 0
+                    pdf.add_page()
+                    
     finally:
-        conn.close()
+        # Cleanup
+        for tf in temp_files:
+            if os.path.exists(tf):
+                os.remove(tf)
+                
+    return pdf.output(dest='S').encode('latin-1')
 
-# --- FIX 7: SECURE ROLE-BASED ORDER CANCELLATION ---
-def cancel_sale_transaction(sale_id, operator, role, reason, password):
-    """
-    Enhanced Undo Logic with Security & Fraud Detection:
-    1. Verifies User Password.
-    2. Checks Role Permissions.
-    3. Runs Fraud Detection (Frequency, Time, Value).
-    4. Restores Inventory.
-    5. Reverses Financials (marks as Cancelled).
-    """
-    if not reason or len(reason.strip()) < 3:
-        return False, "Cancellation reason is mandatory and must be descriptive."
-
-    conn = get_connection()
-    c = conn.cursor()
+# --- EXPIRY LOGIC ---
+def calculate_advanced_loss_prevention(cart_items):
+    if not cart_items: return 0.0, []
     
-    try:
-        # 1. Password Verification
-        ph = hashlib.sha256(password.encode()).hexdigest()
-        c.execute("SELECT 1 FROM users WHERE username=? AND password_hash=?", (operator, ph))
-        if not c.fetchone():
-            return False, "Invalid Password. Identity verification failed."
-
-        # 2. Get Sale Details
-        c.execute("SELECT items_json, status, operator, total_amount, timestamp FROM sales WHERE id=?", (sale_id,))
-        res = c.fetchone()
-        if not res:
-            return False, "Sale ID not found"
+    today = datetime.now()
+    discount = 0.0
+    messages = []
+    
+    item_counts = {}
+    for item in cart_items:
+        if item['id'] not in item_counts:
+            item_counts[item['id']] = {'obj': item, 'count': 0}
+        item_counts[item['id']]['count'] += 1
         
-        items_json_str, status, sale_operator, total_amount, sale_timestamp_str = res
+    for pid, data in item_counts.items():
+        item = data['obj']
+        qty = data['count']
         
-        if status == 'Cancelled':
-            return False, "Sale already cancelled"
+        exp_date_str = item.get('expiry_date')
+        if not exp_date_str or str(exp_date_str).upper() == "NA":
+            continue
             
-        # 3. Permission Check
-        if role == 'Operator' and sale_operator != operator:
-            return False, "Permission Denied: POS Operators can only cancel their own sales."
-
-        # 4. Fraud Detection
-        risk_flags = []
-        
-        # Rule A: Value Threshold (> 5000)
-        if total_amount > 5000:
-            risk_flags.append("High Value")
-            
-        # Rule B: Time (Immediate Cancellation < 5 mins)
         try:
-            sale_dt = datetime.strptime(sale_timestamp_str, "%Y-%m-%d %H:%M:%S")
-            now_dt = datetime.now()
-            if (now_dt - sale_dt).total_seconds() < 300: # 5 mins
-                risk_flags.append("Immediate Reversal")
-        except: pass
-        
-        # Rule C: Frequency (More than 3 cancellations today)
-        today_start = datetime.now().strftime("%Y-%m-%d")
-        c.execute("SELECT count(*) FROM logs WHERE user=? AND action LIKE '%Undo Sale%' AND timestamp >= ?", (operator, today_start))
-        cancel_count = c.fetchone()[0]
-        if cancel_count >= 3:
-            risk_flags.append("High Frequency")
-
-        risk_score = "Low"
-        if risk_flags:
-            risk_score = "High (" + ", ".join(risk_flags) + ")"
-            reason = f"[RISK: {risk_score}] {reason}"
-
-        # 5. Restore Inventory
-        items_ids = json.loads(items_json_str)
-        for pid in items_ids:
-            c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
+            exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
+            days_left = (exp_date - today).days
             
-        # 6. Update Sale Record
-        cancel_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("""UPDATE sales SET status = 'Cancelled', cancellation_reason = ?, cancelled_by = ?, cancellation_timestamp = ? 
-                     WHERE id=?""", (reason, operator, cancel_time, sale_id))
-        
-        # 7. Audit Log
-        log_msg = f"Cancelled Sale #{sale_id}. Value: {total_amount}. Reason: {reason}. Risk: {risk_score}"
-        c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
-                  (cancel_time, operator, "Undo Sale", log_msg))
-        
-        conn.commit()
-        return True, f"Success. Order cancelled. Risk Level: {risk_score}"
-        
-    except Exception as e:
-        conn.rollback()
-        return False, str(e)
-    finally:
-        conn.close()
+            if days_left < 0:
+                pass
+            elif days_left <= 10:
+                item_discount = qty * item['price']
+                discount += item_discount
+                messages.append(f"CRITICAL: {item['name']} is FREE (Expires in {days_left}d)")
+            elif 10 < days_left <= 30:
+                free_items = qty // 2
+                if free_items > 0:
+                    item_discount = free_items * item['price']
+                    discount += item_discount
+                    messages.append(f"BOGO Applied: {item['name']} ({days_left}d left)")
+            elif 30 < days_left <= 60:
+                item_discount = qty * item['price'] * 0.50
+                discount += item_discount
+                messages.append(f"50% Clearance: {item['name']} ({days_left}d left)")
+            elif 60 < days_left <= 90:
+                item_discount = qty * item['price'] * 0.40
+                discount += item_discount
+                messages.append(f"40% Discount: {item['name']} ({days_left}d left)")
+        except:
+            pass
+            
+    return discount, messages
 
-def get_cancellation_audit_log():
-    """Returns a specialized view for cancellation audits."""
-    conn = get_connection()
-    query = """
-    SELECT id as Sale_ID, pos_id, operator as Original_Operator, cancelled_by, 
-           total_amount as Reversed_Amount, cancellation_reason, cancellation_timestamp, timestamp as Original_Time
-    FROM sales 
-    WHERE status = 'Cancelled'
-    ORDER BY cancellation_timestamp DESC
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+def calculate_expiry_bogo(cart_items):
+    return calculate_advanced_loss_prevention(cart_items)
 
-def redo_sale_transaction(sale_id, operator):
-    conn = get_connection()
-    c = conn.cursor()
+def parse_qr_input(data_str):
+    if not data_str: return None
     try:
-        c.execute("SELECT items_json, status FROM sales WHERE id=?", (sale_id,))
-        res = c.fetchone()
-        if not res: return False, "ID not found"
-        
-        items_json_str, status = res
-        if status != 'Cancelled': return False, "Sale is not cancelled"
-        
-        items_ids = json.loads(items_json_str)
-        
-        for pid in items_ids:
-            c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (pid,))
-            
-        c.execute("UPDATE sales SET status = 'Completed', cancellation_reason=NULL, cancelled_by=NULL, cancellation_timestamp=NULL WHERE id=?", (sale_id,))
-        
-        c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
-                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Redo Sale", f"Restored Sale #{sale_id}"))
-        
-        conn.commit()
-        return True, "Success"
-    except Exception as e:
-        conn.rollback()
-        return False, str(e)
-    finally:
-        conn.close()
-
-def get_customer(mobile):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM customers WHERE mobile=?", (mobile.strip(),))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        lp = row[5] if len(row) > 5 and row[5] is not None else 0
-        seg = row[6] if len(row) > 6 and row[6] is not None else 'New'
-        return {"mobile": row[0], "name": row[1], "email": row[2], "visits": row[3], "total_spend": row[4], "loyalty_points": lp, "segment": seg}
+        if data_str.startswith("PROD:"):
+            return int(data_str.split(":")[1])
+    except:
+        return None
     return None
 
-def upsert_customer(mobile, name, email):
-    mobile = mobile.strip()
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT visits FROM customers WHERE mobile=?", (mobile,))
-    res = c.fetchone()
-    if res:
-        c.execute("UPDATE customers SET name=?, email=? WHERE mobile=?", (name, email, mobile))
-    else:
-        c.execute("INSERT INTO customers (mobile, name, email, visits, total_spend, loyalty_points, segment) VALUES (?, ?, ?, 0, 0, 0, 'New')", (mobile, name, email))
-    conn.commit()
-    conn.close()
-
-def get_all_customers():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM customers", conn)
-    conn.close()
-    return df
-
-def get_customer_clv_stats():
-    """
-    Fetches customer data for CLV analysis.
-    Aggregates spend, visits, and segments.
-    Used for: Business Intelligence & Admin Analytics.
-    """
-    conn = get_connection()
-    query = """
-    SELECT name, mobile, total_spend, visits, segment 
-    FROM customers 
-    ORDER BY total_spend DESC
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
-
-def create_user(username, password, role, fullname):
-    conn = get_connection()
-    c = conn.cursor()
-    ph = hashlib.sha256(password.encode()).hexdigest()
+def decode_qr_image(image_file):
+    if qr_decode is None:
+        return None
     try:
-        c.execute("INSERT INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (username, ph, role, fullname))
-        conn.commit()
-        return True
-    except:
-        return False
-    finally:
-        conn.close()
+        image = Image.open(image_file)
+        decoded_objects = qr_decode(image)
+        for obj in decoded_objects:
+            return obj.data.decode("utf-8")
+    except Exception as e:
+        return None
+    return None
 
-def update_user_status(username, status):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET status=? WHERE username=?", (status, username))
-    conn.commit()
-    conn.close()
-
-def get_user_status(username):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT status FROM users WHERE username=?", (username,))
-    res = c.fetchone()
-    conn.close()
-    return res[0] if res else "Active"
-
-def update_password(username, new_password):
-    conn = get_connection()
-    c = conn.cursor()
-    ph = hashlib.sha256(new_password.encode()).hexdigest()
-    c.execute("UPDATE users SET password_hash=? WHERE username=?", (ph, username))
-    conn.commit()
-    conn.close()
-
-def update_fullname(username, name):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET full_name=? WHERE username=?", (name, username))
-    conn.commit()
-    conn.close()
-
-def get_all_users():
-    conn = get_connection()
-    df = pd.read_sql("SELECT username, role, full_name, status FROM users", conn)
-    conn.close()
-    return df
-
-def verify_password(username, password):
-    conn = get_connection()
-    c = conn.cursor()
-    ph = hashlib.sha256(password.encode()).hexdigest()
-    c.execute("SELECT 1 FROM users WHERE username=? AND password_hash=?", (username, ph))
-    res = c.fetchone()
-    conn.close()
-    return res is not None
-
-# --- FIX: COUPON BINDING ---
-def create_coupon(code, dtype, value, min_bill, days_valid, limit, bound_mobile=None):
-    valid_until = (datetime.now() + timedelta(days=days_valid)).strftime("%Y-%m-%d")
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO coupons (code, discount_type, value, min_bill, valid_until, usage_limit, bound_mobile) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (code, dtype, value, min_bill, valid_until, limit, bound_mobile))
-        conn.commit()
-        return True
-    except: return False
-    finally: conn.close()
-
-def get_coupon(code, customer_mobile=None):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM coupons WHERE code=?", (code,))
-    c_data = c.fetchone()
-    conn.close()
-    if c_data:
-        # columns: 0:code, 1:type, 2:value, 3:min, 4:expiry, 5:limit, 6:used, 7:bound_mobile
-        expiry = c_data[4]
-        limit = c_data[5]
-        used = c_data[6]
-        bound_mobile = c_data[7] if len(c_data) > 7 else None
+def get_sound_html(sound_type):
+    if sound_type == 'success':
+        src = "https://www.soundjay.com/buttons/sounds/button-3.mp3"
+    elif sound_type == 'error':
+        src = "https://www.soundjay.com/buttons/sounds/button-10.mp3"
+    elif sound_type == 'celebration':
+        # Short cheer/tada sound
+        src = "https://www.soundjay.com/human/sounds/applause-01.mp3"
+    else: 
+        src = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
         
-        if datetime.now() > datetime.strptime(expiry, "%Y-%m-%d"):
-            return None, "Expired"
-        if used >= limit:
-            return None, "Usage Limit Reached"
+    return f"""
+    <audio autoplay>
+        <source src="{src}" type="audio/mpeg">
+    </audio>
+    """
+
+def generate_hash(data_string):
+    return hashlib.sha256(data_string.encode()).hexdigest()
+
+def generate_integrity_hash(txn_data):
+    raw_string = f"{txn_data[0]}|{txn_data[1]}|{txn_data[2]}|{txn_data[3]}"
+    return hashlib.sha256(raw_string.encode()).hexdigest()
+
+# --- TRIE ---
+class TrieNode:
+    def __init__(self):
+        self.children = {}
+        self.is_end_of_word = False
+        self.data = None
+
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
+
+    def insert(self, word, data):
+        node = self.root
+        for char in word.lower():
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        node.is_end_of_word = True
+        node.data = data
+
+    def search_prefix(self, prefix):
+        node = self.root
+        for char in prefix.lower():
+            if char not in node.children:
+                return []
+            node = node.children[char]
+        return self._collect_words(node)
+
+    def _collect_words(self, node):
+        results = []
+        if node.is_end_of_word:
+            results.append(node.data)
+        for child in node.children.values():
+            results.extend(self._collect_words(child))
+        return results
+
+def linear_search(data_list, key, value):
+    for item in data_list:
+        if str(item.get(key)).lower() == str(value).lower():
+            return item
+    return None
+
+def binary_search(sorted_list, key, value):
+    low = 0
+    high = len(sorted_list) - 1
+    
+    while low <= high:
+        mid = (low + high) // 2
+        mid_val = sorted_list[mid].get(key)
         
-        # Validation for Customer Binding
-        if bound_mobile and bound_mobile != 'None':
-             if not customer_mobile:
-                 return None, "Customer identification required for this coupon"
-             if bound_mobile.strip() != customer_mobile.strip():
-                 return None, "Coupon not valid for this customer"
+        if mid_val < value:
+            low = mid + 1
+        elif mid_val > value:
+            high = mid - 1
+        else:
+            return sorted_list[mid]
+    return None
+
+class POSQueueSimulator:
+    def __init__(self):
+        self.queue = [] 
+    
+    def simulate_peak_hour(self, num_customers):
+        wait_times = []
+        service_time_per_customer = 3 
+        
+        for i in range(num_customers):
+            arrival_offset = random.randint(0, 10)
+            wait = (i * service_time_per_customer) + arrival_offset
+            wait_times.append(wait)
         
         return {
-            "code": c_data[0], "type": c_data[1], "value": c_data[2],
-            "min_bill": c_data[3], "bound_mobile": bound_mobile, "expiry": expiry
-        }, "Valid"
-    return None, "Invalid Code"
-
-def get_customer_coupons(mobile):
-    """Retrieves all active coupons bound to a customer."""
-    if not mobile: return pd.DataFrame()
-    conn = get_connection()
-    now_str = datetime.now().strftime("%Y-%m-%d")
-    query = """
-    SELECT code, discount_type, value, min_bill, valid_until 
-    FROM coupons 
-    WHERE bound_mobile = ? AND valid_until >= ? AND used_count < usage_limit
-    """
-    df = pd.read_sql(query, conn, params=(mobile, now_str))
-    conn.close()
-    return df
-
-def get_all_coupons():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM coupons", conn)
-    conn.close()
-    return df
-
-# --- FIX 9: AUTOMATED COUPON GENERATION WITH BINDING ---
-def generate_auto_coupon(customer_mobile):
-    """Generates a personalized coupon after a sale bound to the customer."""
-    if not customer_mobile: return None
-    
-    # Personalized Code
-    suffix = customer_mobile[-4:] if len(customer_mobile) >= 4 else "0000"
-    rand_tag = random.randint(10, 99)
-    code = f"LOYALTY-{suffix}-{rand_tag}"
-    
-    # 10% off for next visit, valid 30 days, Bound to Customer
-    if create_coupon(code, "%", 10.0, 500.0, 30, 1, bound_mobile=customer_mobile):
-        return code
-    return None
-
-def create_campaign(name, c_type, start, end, config):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO campaigns (name, type, start_time, end_time, config_json) VALUES (?, ?, ?, ?, ?)",
-              (name, c_type, start, end, config_json := json.dumps(config)))
-    conn.commit()
-    conn.close()
-
-def get_active_campaigns():
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM campaigns WHERE is_active='True' AND start_time <= ? AND end_time >= ?", conn, params=(now_str, now_str))
-    conn.close()
-    return df
-
-def get_all_campaigns():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM campaigns ORDER BY id DESC", conn)
-    conn.close()
-    return df
-
-def pick_lucky_winner(days_lookback, min_spend, prize_title="Mystery Gift"):
-    start_dt = (datetime.now() - timedelta(days=days_lookback)).strftime("%Y-%m-%d")
-    conn = get_connection()
-    query = f"""
-    SELECT DISTINCT customer_mobile
-    FROM sales 
-    WHERE timestamp >= '{start_dt}' AND total_amount >= {min_spend} 
-    AND customer_mobile IS NOT NULL AND customer_mobile != '' AND customer_mobile != 'None'
-    """
-    df = pd.read_sql(query, conn)
-    
-    winner = None
-    if not df.empty:
-        winner_mobile = random.choice(df['customer_mobile'].tolist())
-        cust = get_customer(winner_mobile)
-        name_val = cust['name'] if cust else "Unknown Customer"
-        
-        winner = {"name": name_val, "mobile": winner_mobile}
-        
-        c = conn.cursor()
-        c.execute("INSERT INTO lucky_draws (draw_date, winner_name, winner_mobile, prize, criteria) VALUES (?, ?, ?, ?, ?)",
-                  (datetime.now().strftime("%Y-%m-%d"), winner['name'], winner['mobile'], prize_title, f"Spend > {min_spend}"))
-        conn.commit()
-        
-    conn.close()
-    return winner
-
-def get_lucky_draw_history():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM lucky_draws ORDER BY id DESC", conn)
-    conn.close()
-    return df
-
-def get_all_terminals():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM terminals", conn)
-    conn.close()
-    return df
-
-def get_all_terminals_status():
-    """
-    Returns terminals joined with active session data
-    to determine real-time availability.
-    """
-    conn = get_connection()
-    query = """
-    SELECT t.id, t.name, t.location, t.status, s.username as current_user, s.login_time 
-    FROM terminals t
-    LEFT JOIN active_sessions s ON t.id = s.pos_id
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
-
-def get_active_terminal_ids():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id FROM terminals WHERE status='Active'")
-    res = [r[0] for r in c.fetchall()]
-    conn.close()
-    if "Office Dashboard" not in res: res.append("Office Dashboard")
-    return res
-
-def check_terminal_status(t_id):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT status FROM terminals WHERE id=?", (t_id,))
-    res = c.fetchone()
-    conn.close()
-    return res[0] if res else "Unknown"
-
-def add_terminal(t_id, name, location):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO terminals (id, name, location, status) VALUES (?, ?, ?, 'Active')", (t_id, name, location))
-        conn.commit()
-        return True
-    except:
-        return False
-    finally:
-        conn.close()
-
-def update_terminal_status(t_id, status):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE terminals SET status=? WHERE id=?", (status, t_id))
-    conn.commit()
-    conn.close()
-
-def force_unlock_terminal(pos_id):
-    """Forcefully removes a session lock for a specific terminal."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM active_sessions WHERE pos_id=?", (pos_id,))
-    conn.commit()
-    conn.close()
-
-def create_stock_request(prod_id, prod_name, qty, notes, user):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO stock_requests (product_id, product_name, quantity, notes, status, requested_by, timestamp) VALUES (?, ?, ?, ?, 'Pending', ?, ?)",
-              (prod_id, prod_name, qty, notes, user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
-
-def get_stock_requests():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM stock_requests ORDER BY id DESC", conn)
-    conn.close()
-    return df
-
-def update_request_status(req_id, status):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE stock_requests SET status=? WHERE id=?", (status, req_id))
-    conn.commit()
-    conn.close()
-
-def add_product(name, category, price, stock, cost_price, expiry_date=None, image_data=None):
-    conn = get_connection()
-    c = conn.cursor()
-    
-    if expiry_date == "NA":
-        expiry_str = "NA"
-    elif expiry_date:
-        expiry_str = expiry_date.strftime("%Y-%m-%d")
-    else:
-        expiry_str = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
-
-    try:
-        img_blob = sqlite3.Binary(image_data) if image_data else None
-        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, is_dead_stock, image_data) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'False', ?)",
-                  (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d"), expiry_str, img_blob))
-        conn.commit()
-        return True
-    except Exception as e:
-        print(e)
-        return False
-    finally:
-        conn.close()
-
-def update_product(p_id, name, category, price, stock, cost_price):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE products SET name=?, category=?, price=?, stock=?, cost_price=? WHERE id=?",
-              (name, category, price, stock, cost_price, p_id))
-    conn.commit()
-    conn.close()
-
-def delete_product(p_id):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM products WHERE id=?", (p_id,))
-    conn.commit()
-    conn.close()
-
-def toggle_dead_stock(p_id, is_dead):
-    conn = get_connection()
-    c = conn.cursor()
-    val = 'True' if is_dead else 'False'
-    c.execute("UPDATE products SET is_dead_stock=? WHERE id=?", (val, p_id))
-    conn.commit()
-    conn.close()
-
-def get_all_products():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM products", conn)
-    conn.close()
-    return df
-
-def get_product_by_id(p_id):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM products WHERE id=?", (p_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        col_names = [description[0] for description in c.description]
-        data = dict(zip(col_names, row))
-        return data
-    return None
-
-def restock_product(p_id, quantity):
-    if quantity <= 0: return False
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("UPDATE products SET stock = stock + ?, last_restock_date = ? WHERE id=?",
-              (quantity, datetime.now().strftime("%Y-%m-%d"), p_id))
-    conn.commit()
-    conn.close()
-    return True
-
-def is_pos_occupied(pos_id):
-    if pos_id == "Office Dashboard": return None
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT username FROM active_sessions WHERE pos_id=?", (pos_id,))
-    res = c.fetchone()
-    conn.close()
-    return res[0] if res else None
-
-def lock_terminal(pos_id, username, role):
-    conn = get_connection()
-    c = conn.cursor()
-    lock_key = pos_id
-    if pos_id == "Office Dashboard":
-        lock_key = f"Office_{username}_{random.randint(1000,9999)}"
-    
-    # FIX: Store FULL timestamp for session tracking
-    login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    c.execute("INSERT OR REPLACE INTO active_sessions (pos_id, username, login_time, role) VALUES (?, ?, ?, ?)",
-              (lock_key, username, login_time, role))
-    conn.commit()
-    conn.close()
-
-def unlock_terminal(username):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM active_sessions WHERE username=?", (username,))
-    conn.commit()
-    conn.close()
-
-def force_clear_all_sessions():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM active_sessions")
-    conn.commit()
-    conn.close()
-
-def get_sales_data():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM sales", conn)
-    conn.close()
-    return df
-
-# --- NEW ANALYTICS QUERIES ---
-
-def get_employee_activity_live():
-    """Returns dataframe of all employees with live status from active_sessions."""
-    conn = get_connection()
-    
-    # Get all users and their active session info
-    query_users = """
-    SELECT u.username, u.full_name, u.role, 
-           s.pos_id as current_pos, s.login_time
-    FROM users u
-    LEFT JOIN active_sessions s ON u.username = s.username
-    WHERE u.role != 'Admin'
-    """
-    df_users = pd.read_sql(query_users, conn)
-    
-    # Calculate Session-Based Collection
-    # We iterate because for active users we want sales > session_start_time
-    live_sales = []
-    
-    for _, row in df_users.iterrows():
-        username = row['username']
-        login_time = row['login_time']
-        
-        if pd.notna(login_time) and login_time:
-            # For active users, sum sales since login
-            sql = "SELECT SUM(total_amount) FROM sales WHERE operator=? AND timestamp >= ? AND status != 'Cancelled'"
-            params = (username, login_time)
-        else:
-            # For inactive users, show 0 (Session ended)
-            sql = "SELECT 0" # Or could show today's total, but request said "Live session-based"
-            params = ()
-            
-        c = conn.cursor()
-        c.execute(sql, params)
-        res = c.fetchone()
-        amount = res[0] if res and res[0] else 0.0
-        live_sales.append(amount)
-        c.close()
-    
-    df_users['daily_sales'] = live_sales
-    conn.close()
-    
-    return df_users
-
-def get_pos_collection_stats():
-    """
-    Aggregates revenue by POS ID and Payment Mode.
-    FIX: Left joins from terminals to ensure ALL POS IDs are shown.
-    """
-    conn = get_connection()
-    query = """
-    SELECT t.id as pos_id, s.payment_mode, SUM(s.total_amount) as total
-    FROM terminals t
-    LEFT JOIN sales s ON t.id = s.pos_id AND s.status != 'Cancelled'
-    WHERE t.id != 'Office Dashboard'
-    GROUP BY t.id, s.payment_mode
-    ORDER BY t.id
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
-
-def get_employee_performance_stats():
-    """Aggregates performance metrics per operator."""
-    conn = get_connection()
-    query = """
-    SELECT operator, 
-           COUNT(*) as txn_count, 
-           SUM(total_amount) as total_revenue, 
-           AVG(time_taken) as avg_speed,
-           SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END) as cancelled_orders
-    FROM sales
-    GROUP BY operator
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
-
-def seed_advanced_demo_data():
-    conn = get_connection()
-    c = conn.cursor()
-
-    demo_categories = [
-        "Snacks", "Beverages", "Grocery", "Dairy", "Bakery", 
-        "Frozen", "Personal Care", "Stationery", "Electronics", "Household"
-    ]
-    for cat in demo_categories:
-        c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
-
-    c.execute("SELECT count(*) FROM products")
-    if c.fetchone()[0] < 50:
-        demo_products = {
-            "Snacks": [("Lays Classic", 20, 15), ("Doritos Cheese", 30, 25), ("Pringles", 100, 80), ("Oreo", 40, 30), ("KitKat", 25, 18), ("Lays Chili", 20, 15), ("Cheetos", 25, 18), ("Popcorn", 50, 35), ("Pretzels", 60, 45), ("Biscuits", 30, 20)],
-            "Beverages": [("Coke 500ml", 40, 30), ("Pepsi 500ml", 40, 30), ("Red Bull", 125, 90), ("Tropicana Juice", 110, 80), ("Water Bottle", 20, 10), ("Fanta", 40, 30), ("Sprite", 40, 30), ("Iced Tea", 60, 40), ("Cold Coffee", 80, 50), ("Lemonade", 30, 15)],
-            "Grocery": [("Rice 1kg", 80, 60), ("Wheat Flour 1kg", 60, 45), ("Sugar 1kg", 50, 40), ("Salt", 20, 10), ("Cooking Oil 1L", 180, 150), ("Dal", 120, 90), ("Spices Pack", 200, 150), ("Pasta", 70, 50), ("Noodles", 20, 15), ("Ketchup", 90, 70)],
-            "Dairy": [("Milk 1L", 60, 50), ("Cheese Slices", 120, 90), ("Butter 100g", 55, 45), ("Yogurt", 30, 20), ("Cream", 80, 60)],
-            "Bakery": [("Bread", 40, 30), ("Bun", 20, 10), ("Croissant", 80, 50), ("Muffin", 50, 30), ("Cake Slice", 100, 60)],
-            "Frozen": [("Frozen Peas", 90, 60), ("Ice Cream Tub", 250, 180), ("French Fries", 150, 100), ("Chicken Nuggets", 300, 220), ("Pizza", 200, 150)],
-            "Personal Care": [("Shampoo", 200, 150), ("Soap", 40, 25), ("Toothpaste", 80, 60), ("Face Wash", 150, 100), ("Deodorant", 180, 120)],
-            "Stationery": [("Notebook", 50, 30), ("Pen Set", 100, 70), ("Pencil Box", 80, 50), ("A4 Paper Rim", 300, 220), ("Stapler", 120, 80)],
-            "Electronics": [("USB Cable", 150, 50), ("Earphones", 500, 300), ("Charger", 400, 200), ("Power Bank", 1200, 900), ("Mouse", 600, 400)],
-            "Household": [("Detergent", 200, 160), ("Dish Soap", 80, 50), ("Sponge", 30, 10), ("Trash Bags", 100, 70), ("Air Freshener", 150, 100)]
+            "avg_wait": sum(wait_times)/len(wait_times),
+            "max_queue_length": num_customers,
+            "throughput": num_customers / ((max(wait_times)/60) + 0.1) 
         }
-        for cat, items in demo_products.items():
-            for name, price, cost in items:
-                stock = random.randint(20, 100)
-                exp_days = random.randint(30, 365)
-                expiry = (datetime.now() + timedelta(days=exp_days)).strftime("%Y-%m-%d")
-                c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date, is_dead_stock) VALUES (?, ?, ?, ?, ?, ?, ?, 'False')",
-                          (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
+
+def calculate_abc_analysis(df_products):
+    if df_products.empty: return df_products
     
-    demo_users = [
-        ('ammar_admin', 'admin123', 'Admin', 'Ammar Admin'),
-        ('manager_1', 'manager123', 'Manager', 'Sarah Manager'),
-        ('manager_2', 'manager123', 'Manager', 'Mike Manager'),
-        ('pos_op_1', 'pos123', 'Operator', 'Alice Operator'),
-        ('pos_op_2', 'pos123', 'Operator', 'Bob Operator'),
-        ('pos_op_3', 'pos123', 'Operator', 'Charlie Operator'),
-        ('pos_op_4', 'pos123', 'Operator', 'Diana Operator')
-    ]
-    for u, p, r, n in demo_users:
-        ph = hashlib.sha256(p.encode()).hexdigest()
-        c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
-
-    # REALISTIC CUSTOMER DATA FOR EXAM EVALUATION
-    demo_customers = [
-        ("9876500001", "Amit Sharma", "amit.s@example.com", "Regular"),
-        ("9876500002", "Priya Singh", "priya.s@example.com", "High-Value"),
-        ("9876500003", "Rahul Verma", "rahul.v@example.com", "Occasional"),
-        ("9876500004", "Sneha Gupta", "sneha.g@example.com", "New"),
-        ("9876500005", "Vikram Malhotra", "vikram.m@example.com", "High-Value"),
-        ("9876500006", "Anjali Mehta", "anjali.m@example.com", "Regular"),
-        ("9876500007", "Rohan Das", "rohan.d@example.com", "New"),
-        ("9876500008", "Ishita Patel", "ishita.p@example.com", "Regular"),
-        ("9876500009", "Karan Johar", "karan.j@example.com", "Occasional"),
-        ("9876500010", "Simran Kaur", "simran.k@example.com", "High-Value"),
-        ("9876500011", "Arjun Rampal", "arjun.r@example.com", "Regular"),
-        ("9876500012", "Deepika P", "deepika.p@example.com", "High-Value"),
-        ("9876500013", "Ranveer S", "ranveer.s@example.com", "Regular"),
-        ("9876500014", "Alia B", "alia.b@example.com", "New"),
-        ("9876500015", "Ranbir K", "ranbir.k@example.com", "Occasional"),
-        ("9876500016", "Katrina K", "katrina.k@example.com", "Regular"),
-        ("9876500017", "Salman K", "salman.k@example.com", "High-Value"),
-        ("9876500018", "Shahrukh K", "shahrukh.k@example.com", "High-Value"),
-        ("9876500019", "Aamir K", "aamir.k@example.com", "Occasional"),
-        ("9876500020", "Akshay K", "akshay.k@example.com", "Regular")
-    ]
-    for mob, name, email, seg in demo_customers:
-        c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend, loyalty_points) VALUES (?, ?, ?, ?, 0, 0, 0)", 
-                  (mob, name, email, seg))
-
-    c.execute("SELECT count(*) FROM sales")
-    if c.fetchone()[0] < 50:
-        ops = ['pos_op_1', 'pos_op_2', 'pos_op_3', 'pos_op_4']
-        modes = ['Cash', 'UPI', 'Card']
-        c.execute("SELECT id, price FROM products")
-        all_prods = c.fetchall()
+    df = df_products.copy()
+    df['inventory_value'] = df['price'] * df['stock']
+    df = df.sort_values('inventory_value', ascending=False)
+    
+    df['cumulative_value'] = df['inventory_value'].cumsum()
+    df['total_value'] = df['inventory_value'].sum()
+    df['cumulative_perc'] = df['cumulative_value'] / df['total_value']
+    
+    def classify(perc):
+        if perc <= 0.70: return 'A (High Value)'
+        elif perc <= 0.90: return 'B (Medium Value)'
+        else: return 'C (Low Value)'
         
-        for i in range(60): # Generate 60 transactions
-            days_ago = random.randint(0, 30)
-            txn_dt = datetime.now() - timedelta(days=days_ago, hours=random.randint(0, 12), minutes=random.randint(0, 59))
-            timestamp = txn_dt.strftime("%Y-%m-%d %H:%M:%S")
-            
-            operator = random.choice(ops)
-            mode = random.choice(modes)
-            cust = random.choice(demo_customers)
-            cust_mobile = cust[0]
-            
-            num_items = random.randint(1, 8)
-            cart_items = random.sample(all_prods, min(num_items, len(all_prods)))
-            total = sum(p[1] for p in cart_items)
-            items_json = json.dumps([p[0] for p in cart_items])
-            
-            # 10% chance of being cancelled
-            status = 'Completed'
-            reason = None
-            cancelled_by = None
-            if random.random() < 0.1:
-                status = 'Cancelled'
-                reason = 'Customer Changed Mind'
-                cancelled_by = 'ammar_admin'
-            
-            c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
-                         operator, payment_mode, time_taken, pos_id, customer_mobile, status, cancellation_reason, cancelled_by) 
-                         VALUES (?, ?, ?, 'demo_hash', ?, ?, ?, 'POS-1', ?, ?, ?, ?)""",
-                      (timestamp, total, items_json, operator, mode, random.randint(20, 120), cust_mobile, status, reason, cancelled_by))
-            
-            if status == 'Completed':
-                c.execute("UPDATE customers SET visits = visits + 1, total_spend = total_spend + ?, loyalty_points = loyalty_points + ? WHERE mobile=?",
-                        (total, int(total/100), cust_mobile))
-                c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, 'Sale', ?)",
-                        (timestamp, operator, f"Completed Sale for {total}"))
-            else:
-                c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, 'Undo Sale', ?)",
-                        (timestamp, operator, f"Cancelled Sale for {total}"))
-
-    conn.commit()
-    conn.close()
-
-def get_transaction_history(filters=None):
-    query = "SELECT id, timestamp, total_amount, payment_mode, operator, customer_mobile, status, pos_id, integrity_hash FROM sales WHERE 1=1"
-    params = []
-    
-    if filters:
-        if filters.get('bill_no'):
-            query += " AND id = ?"
-            params.append(filters['bill_no'])
-        if filters.get('operator'):
-            query += " AND operator LIKE ?"
-            params.append(f"%{filters['operator']}%")
-        if filters.get('date'):
-            query += " AND timestamp LIKE ?"
-            params.append(f"{filters['date']}%")
-            
-    query += " ORDER BY id DESC"
-    
-    conn = get_connection()
-    try:
-        df = pd.read_sql(query, conn, params=params)
-    except:
-        df = pd.DataFrame()
-    finally:
-        conn.close()
+    df['abc_class'] = df['cumulative_perc'].apply(classify)
     return df
 
-def get_full_logs():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM logs ORDER BY id DESC", conn)
-    conn.close()
-    return df
+def calculate_inventory_metrics(df_sales, df_products):
+    # FIX: Ensure sales DF excludes cancelled items before metric calc
+    if 'status' in df_sales.columns:
+        df_sales = df_sales[df_sales['status'] != 'Cancelled']
 
-def get_category_performance():
-    conn = get_connection()
-    # FIX 3: Exclude Cancelled Orders
-    sales = pd.read_sql("SELECT items_json, total_amount FROM sales WHERE status != 'Cancelled'", conn)
-    products = pd.read_sql("SELECT id, category FROM products", conn)
-    conn.close()
+    metrics = []
+    for _, prod in df_products.iterrows():
+        annual_demand = prod['sales_count'] * 12 if prod['sales_count'] > 0 else 10 
+        holding_cost = prod['cost_price'] * 0.20 
+        order_cost = 500 
+        
+        eoq = 0
+        if holding_cost > 0:
+            eoq = math.sqrt((2 * annual_demand * order_cost) / holding_cost)
+            
+        metrics.append({
+            "name": prod['name'],
+            "annual_demand_est": annual_demand,
+            "eoq": math.ceil(eoq),
+            "reorder_point": math.ceil(annual_demand/365 * 7) + 5 
+        })
+    return pd.DataFrame(metrics)
+
+def forecast_next_period(sales_array, window=5):
+    if len(sales_array) < window:
+        return np.mean(sales_array) if len(sales_array) > 0 else 0
+        
+    recent = sales_array[-window:]
+    weights = np.arange(1, len(recent) + 1)
+    return np.dot(recent, weights) / weights.sum()
+
+def analyze_trend_slope(sales_series):
+    if len(sales_series) < 2: return "Stable"
+    x = np.arange(len(sales_series))
+    y = np.array(sales_series)
+    slope, _ = np.polyfit(x, y, 1)
     
-    cat_map = products.set_index('id')['category'].to_dict()
-    cat_sales = {}
+    if slope > 0.5: return "↗️ Increasing"
+    elif slope < -0.5: return "↘️ Decreasing"
+    else: return "➡️ Stable"
+
+def detect_fraud(cart_items, total, time_sec):
+    flags = []
+    qty_map = {}
+    for i in cart_items: qty_map[i['name']] = qty_map.get(i['name'], 0) + 1
     
-    for _, row in sales.iterrows():
+    if any(q > 10 for q in qty_map.values()):
+        flags.append("Bulk Purchase Anomaly (>10 units)")
+        
+    if len(cart_items) > 3 and time_sec < 5:
+        flags.append("Superhuman Speed (<5s)")
+        
+    if total > 100000:
+        flags.append("High Value Transaction (>1L)")
+        
+    return flags
+
+def rank_products(df_sales, df_products):
+    if df_sales.empty: return pd.DataFrame()
+    
+    # FIX 3: Filter out cancelled transactions for ranking
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
+    import json
+    all_items = []
+    for _, row in active_sales.iterrows():
         try:
-            item_ids = json.loads(row['items_json'])
-            if not item_ids: continue
-            
-            for iid in item_ids:
-                cat = cat_map.get(iid, "Unknown")
-                share = row['total_amount'] / len(item_ids) 
-                cat_sales[cat] = cat_sales.get(cat, 0) + share
+            ids = json.loads(row['items_json'])
+            all_items.extend(ids)
         except: continue
         
-    return pd.DataFrame(list(cat_sales.items()), columns=['Category', 'Revenue']).sort_values('Revenue', ascending=False)
+    from collections import Counter
+    counts = Counter(all_items)
+    
+    ranking_data = []
+    for _, prod in df_products.iterrows():
+        qty = counts.get(prod['id'], 0)
+        rev = qty * prod['price']
+        ranking_data.append({
+            "name": prod['name'],
+            "qty_sold": qty,
+            "revenue": rev,
+            "score": (qty * 10) + (rev * 0.01) 
+        })
+        
+    ranking_data.sort(key=lambda x: x['score'], reverse=True)
+    
+    for i, item in enumerate(ranking_data):
+        if i == 0: item['rank'] = "🥇 Top Seller"
+        elif i < len(ranking_data)/2: item['rank'] = "🥈 Average Performer"
+        else: item['rank'] = "🥉 Low Performer"
+        
+    return pd.DataFrame(ranking_data)
 
-# --- FIX 3: CATEGORY & TERMINAL METHODS ---
-def get_categories_list():
-    """Fetches distinct categories for UI filters."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT name FROM categories")
-    cats = [row[0] for row in c.fetchall()]
-    conn.close()
-    return cats
+# --- PROFIT & LOSS ANALYSIS ---
+def calculate_profit_loss(df_sales, df_products):
+    if df_sales.empty or df_products.empty:
+        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0, "margin_percent": 0}, pd.DataFrame()
 
-def add_category(name):
-    """Adds a new category."""
-    conn = get_connection()
-    c = conn.cursor()
+    # FIX 3: STRICT FINANCIAL ACCURACY - Exclude Cancelled Orders
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
+    prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
+    
+    category_pl = {}
+    total_rev = 0
+    total_cost = 0
+
+    for _, row in active_sales.iterrows():
+        try:
+            items = json.loads(row['items_json'])
+            for pid in items:
+                if pid in prod_map:
+                    p = prod_map[pid]
+                    cp = p['cost_price']
+                    sp = p['price']
+                    
+                    profit = sp - cp
+                    
+                    total_rev += sp
+                    total_cost += cp
+                    
+                    cat = p['category']
+                    if cat not in category_pl:
+                        category_pl[cat] = {'revenue': 0, 'cost': 0, 'profit': 0}
+                    category_pl[cat]['revenue'] += sp
+                    category_pl[cat]['cost'] += cp
+                    category_pl[cat]['profit'] += profit
+                    
+        except: continue
+
+    net_profit = total_rev - total_cost
+    
+    pl_data = []
+    for cat, metrics in category_pl.items():
+        pl_data.append({
+            "Category": cat,
+            "Revenue": metrics['revenue'],
+            "Cost": metrics['cost'],
+            "Profit": metrics['profit'],
+            "Margin %": (metrics['profit'] / metrics['revenue'] * 100) if metrics['revenue'] > 0 else 0
+        })
+    
+    return {
+        "net_profit": net_profit, 
+        "total_revenue": total_rev, 
+        "total_cost": total_cost,
+        "margin_percent": (net_profit / total_rev * 100) if total_rev > 0 else 0
+    }, pd.DataFrame(pl_data)
+
+def analyze_risk_inventory(df_products):
+    if df_products.empty: return {}, pd.DataFrame()
+    
+    today = datetime.now()
+    risk_data = []
+    
+    dead_stock_val = 0
+    expired_stock_val = 0
+    near_expiry_val = 0
+    
+    for _, row in df_products.iterrows():
+        status = "Safe"
+        is_dead = str(row.get('is_dead_stock', 'False')) == 'True'
+        exp_date_str = row.get('expiry_date')
+        
+        if exp_date_str and str(exp_date_str).upper() != "NA":
+            try:
+                exp_date = datetime.strptime(str(exp_date_str), "%Y-%m-%d")
+                days_left = (exp_date - today).days
+                
+                if days_left < 0:
+                    status = "Expired"
+                    expired_stock_val += (row['stock'] * row['cost_price'])
+                elif days_left < 30:
+                    status = "Near Expiry"
+                    near_expiry_val += (row['stock'] * row['cost_price'])
+            except: 
+                pass
+        elif str(exp_date_str).upper() == "NA":
+             status = "Non-Expirable"
+            
+        if is_dead:
+            dead_stock_val += (row['stock'] * row['cost_price'])
+            
+        risk_data.append({
+            "Name": row['name'],
+            "Stock": row['stock'],
+            "Value": row['stock'] * row['cost_price'],
+            "Status": status,
+            "Is Dead Stock": "Yes" if is_dead else "No",
+            "Expiry": exp_date_str
+        })
+        
+    return {
+        "dead_stock_value": dead_stock_val,
+        "expired_loss": expired_stock_val,
+        "near_expiry_risk": near_expiry_val
+    }, pd.DataFrame(risk_data)
+
+def calculate_financial_ratios(df_sales, df_products):
+    current_inv_val = (df_products['stock'] * df_products['cost_price']).sum()
+    
+    # FIX 3: Filter Cancelled
+    if 'status' in df_sales.columns:
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
+    else:
+        active_sales = df_sales
+
+    cogs = 0
+    prod_cp_map = df_products.set_index('id')['cost_price'].to_dict()
+    
+    for _, row in active_sales.iterrows():
+        try:
+            items = json.loads(row['items_json'])
+            for pid in items:
+                cogs += prod_cp_map.get(pid, 0)
+        except: continue
+        
+    turnover_ratio = (cogs / current_inv_val) if current_inv_val > 0 else 0
+    
+    return {
+        "inventory_turnover_ratio": round(turnover_ratio, 2),
+        "inventory_valuation": current_inv_val,
+        "cogs": cogs
+    }
+
+def backup_system():
+    if not os.path.exists("backups"): os.makedirs("backups")
+    fname = f"backups/inventory_backup_{int(time.time())}.db"
     try:
-        c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
-        conn.commit()
-        return True
-    except:
-        return False
-    finally:
-        conn.close()
+        shutil.copy("inventory_system.db", fname)
+        return fname
+    except Exception as e:
+        return None
 
-def get_terminal_stats():
-    """Calculates active orders and revenue per POS terminal."""
-    conn = get_connection()
-    df = pd.read_sql("""
-        SELECT 
-            pos_id, 
-            COUNT(*) as order_count, 
-            SUM(total_amount) as total_revenue,
-            MAX(timestamp) as last_active
-        FROM sales 
-        WHERE status != 'Cancelled'
-        GROUP BY pos_id
-    """, conn)
-    conn.close()
-    return df
+class PDFReceipt(FPDF):
+    def __init__(self, store_name, logo_path=None):
+        super().__init__()
+        self.store_name = store_name
+        self.logo_path = logo_path
+
+    def header(self):
+        if self.logo_path and os.path.exists(self.logo_path):
+            try:
+                self.image(self.logo_path, 10, 8, 25)
+                self.set_xy(40, 10)
+            except: pass
+        
+        self.set_font('Arial', 'B', 15)
+        # Sanitization not needed here if store_name is ASCII, but good practice
+        safe_store = self.store_name.encode('latin-1', 'replace').decode('latin-1')
+        self.cell(0, 10, safe_store, 0, 1, 'C')
+        self.set_font('Arial', '', 9)
+        self.cell(0, 5, 'Retail & POS System', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None, new_coupon=None):
+    """
+    Generates a production-grade PDF receipt using FPDF.
+    
+    CRITICAL FIX: 
+    - Encodes strings to 'latin-1' to prevent UTF-8 crashes with currency symbols.
+    - Replaces '₹' with 'Rs.' explicitly.
+    - Includes Payment Mode, Operator, and POS ID as per audit requirements.
+    """
+    logo_path = "logo.png" if os.path.exists("logo.png") else None
+    
+    pdf = PDFReceipt(store_name, logo_path)
+    pdf.add_page()
+    
+    pdf.set_font("Arial", size=10)
+    
+    def clean_text(text):
+        """Replaces Unicode characters causing Latin-1 crashes."""
+        if not text: return ""
+        text = str(text)
+        text = text.replace("₹", "Rs. ")
+        text = text.replace("“", '"').replace("”", '"').replace("’", "'")
+        return text.encode('latin-1', 'replace').decode('latin-1')
+
+    # Header Info (Audit Trail)
+    pdf.cell(100, 6, clean_text(f"Receipt No: #{txn_id}"), 0, 0)
+    pdf.cell(0, 6, clean_text(f"Date: {time_str}"), 0, 1, 'R')
+    pdf.cell(100, 6, clean_text(f"Cashier: {operator}"), 0, 0)
+    pdf.cell(0, 6, clean_text(f"POS ID: {pos}"), 0, 1, 'R')
+    pdf.cell(100, 6, clean_text(f"Payment: {mode}"), 0, 1, 'L')
+    
+    if customer:
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(0, 6, "Customer Details:", 0, 1, 'L')
+        pdf.set_font("Arial", '', 10)
+        pdf.cell(0, 5, clean_text(f"Name: {customer.get('name', 'N/A')}"), 0, 1)
+        pdf.cell(0, 5, clean_text(f"Mobile: {customer.get('mobile', 'N/A')}"), 0, 1)
+        if customer.get('loyalty_points'):
+            pdf.cell(0, 5, clean_text(f"Loyalty Balance: {customer.get('loyalty_points')} Pts"), 0, 1)
+
+    pdf.ln(5)
+    
+    # Table Header
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(100, 8, "Item", 1, 0, 'L', True)
+    pdf.cell(30, 8, "Price", 1, 0, 'C', True)
+    pdf.cell(20, 8, "Qty", 1, 0, 'C', True)
+    pdf.cell(40, 8, "Total", 1, 1, 'R', True)
+    
+    pdf.set_font("Arial", '', 10)
+    item_summary = {}
+    for i in items:
+        if i['name'] in item_summary:
+            item_summary[i['name']]['qty'] += 1
+            item_summary[i['name']]['total'] += i['price']
+        else:
+            item_summary[i['name']] = {'price': i['price'], 'qty': 1, 'total': i['price']}
+            
+    for name, data in item_summary.items():
+        pdf.cell(100, 7, clean_text(name), 1)
+        pdf.cell(30, 7, f"{data['price']:.2f}", 1, 0, 'C')
+        pdf.cell(20, 7, str(data['qty']), 1, 0, 'C')
+        pdf.cell(40, 7, f"{data['total']:.2f}", 1, 1, 'R')
+        
+    pdf.ln(5)
+    pdf.set_font("Arial", '', 10)
+    
+    # Totals Section
+    if tax_info and tax_info.get('tax_amount', 0) > 0:
+        pdf.cell(150, 6, f"GST ({tax_info['tax_percent']}%)", 0, 0, 'R')
+        pdf.cell(40, 6, f"{tax_info['tax_amount']:.2f}", 1, 1, 'R')
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(150, 8, "NET TOTAL", 0, 0, 'R')
+    # Clean text to handle currency symbol if passed in total string format (unlikely here but safe)
+    pdf.cell(40, 8, clean_text(f"Rs. {total:,.2f}"), 1, 1, 'R')
+    
+    pdf.set_font("Arial", '', 9)
+    pdf.ln(10)
+    pdf.cell(0, 5, clean_text(f"Payment Mode: {mode}"), 0, 1, 'L')
+    pdf.cell(0, 5, "Terms: Non-refundable. Goods once sold cannot be returned.", 0, 1, 'C')
+    
+    # --- FIX 4: PRINT COUPON ---
+    if new_coupon:
+        pdf.ln(10)
+        pdf.set_line_width(0.5)
+        pdf.set_draw_color(100, 100, 100)
+        
+        # Dashed line workaround for FPDF
+        x = pdf.get_x()
+        y = pdf.get_y()
+        pdf.dashed_line(x, y, x + 190, y, 1, 1)
+        
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(0, 8, clean_text("✂️ EXCLUSIVE OFFER FOR YOU ✂️"), 0, 1, 'C')
+        
+        pdf.set_font("Courier", 'B', 14)
+        pdf.cell(0, 8, clean_text(f"CODE: {new_coupon['code']}"), 0, 1, 'C')
+        
+        pdf.set_font("Arial", '', 10)
+        val_text = f"{new_coupon['value']}%" if new_coupon['type'] == '%' else f"Rs. {new_coupon['value']}"
+        pdf.cell(0, 6, clean_text(f"Get {val_text} OFF on your next visit!"), 0, 1, 'C')
+        pdf.cell(0, 5, clean_text(f"Valid for {new_coupon['bound_mobile']} until {new_coupon['expiry']}"), 0, 1, 'C')
+        
+        pdf.ln(5)
+        y = pdf.get_y()
+        pdf.dashed_line(x, y, x + 190, y, 1, 1)
+    
+    return pdf.output(dest='S').encode('latin-1')
+
+def generate_upi_qr(vpa, name, amount, note):
+    if not name: name = "Merchant"
+    
+    params = {
+        "pa": vpa, 
+        "pn": name, 
+        "am": f"{amount:.2f}", 
+        "cu": "INR", 
+        "tn": note,
+        "mc": "0000", 
+        "mode": "02", 
+        "orgid": "000000" 
+    }
+    url = f"upi://pay?{urllib.parse.urlencode(params)}"
+    qr = qrcode.QRCode(box_size=10, border=4)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = BytesIO()
+    img.save(buf)
+    return buf.getvalue()
+
+def validate_card(number, expiry, cvv):
+    if not number.isdigit() or not (13 <= len(number) <= 19):
+        return False, "Invalid Card Number Length (13-19 digits required)"
+    
+    if not cvv.isdigit() or not (3 <= len(cvv) <= 4):
+        return False, "Invalid CVV (3-4 digits required)"
+    
+    try:
+        if "/" not in expiry: return False, "Invalid Expiry Format (Use MM/YY)"
+        exp_m, exp_y = map(int, expiry.split('/'))
+        if not (1 <= exp_m <= 12): return False, "Invalid Month"
+        current_year = int(datetime.now().strftime("%y"))
+        if exp_y < current_year: return False, "Card Expired"
+    except:
+        return False, "Invalid Expiry Date"
+
+    digits = [int(d) for d in number]
+    checksum = digits.pop()
+    digits.reverse()
+    doubled = []
+    for i, d in enumerate(digits):
+        if i % 2 == 0:
+            d *= 2
+            if d > 9: d -= 9
+        doubled.append(d)
+    total = sum(doubled) + checksum
+    
+    if total % 10 == 0:
+        return True, "Valid"
+    else:
+        return False, "Invalid Card Number (Luhn Check Failed)"
