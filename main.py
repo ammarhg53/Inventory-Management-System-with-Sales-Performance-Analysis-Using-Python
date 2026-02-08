@@ -66,7 +66,7 @@ if 'product_trie' not in st.session_state:
     st.session_state['product_trie'] = trie
     st.session_state['df_products'] = df_p
 
-# --- DOCUMENTATION MODULE ---
+# --- DOCUMENTATION MODULE (Logic Preserved, Removed from Nav) ---
 def render_docs():
     st.title("📘 System Documentation & Developer Guide")
     st.markdown("---")
@@ -239,7 +239,6 @@ def logout_user():
 
 # --- MODULES ---
 
-# --- FIXED MISSING MODULES (RUNTIME ERROR FIX) ---
 def inventory_manager():
     st.title("📦 Master Inventory Management")
     tab_view, tab_add, tab_restock, tab_reqs = st.tabs(["View & Edit", "Add New Product", "➕ Restock (Manual/QR)", "📋 Stock Requests"])
@@ -299,15 +298,38 @@ def inventory_manager():
         st.dataframe(db.get_stock_requests(), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
+# --- RESTORED ADMIN PANEL ---
 def admin_panel():
     st.title("🛡️ Admin Console")
-    tab_dash, tab_emp, tab_settings, tab_cust = st.tabs(["Controls", "Employees", "Settings", "Customers"])
+    # Extended tabs to restore full functionality
+    tab_dash, tab_emp, tab_settings, tab_users, tab_terms, tab_coupons, tab_logs = st.tabs([
+        "Controls", "Employees", "⚙️ Settings", "👥 Users", "🖥️ Terminals", "🎟️ Coupons", "📜 Logs"
+    ])
     
     with tab_dash:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         if st.button("🔓 Force Unlock All Terminals"):
             db.force_clear_all_sessions()
             st.success("All session locks cleared.")
+        
+        st.markdown("### 🚫 Order Cancellation")
+        c_undo, c_search = st.columns(2)
+        with c_undo:
+            st.warning("Admin Override: Undo Last Sale")
+            if st.session_state['undo_stack']:
+                last_id = st.session_state['undo_stack'][-1]
+                if st.button(f"Undo Sale #{last_id}"):
+                    # Admin can fast-track undo logic here if needed, or use safe func
+                    st.info("Use search below for safer cancellation.")
+        with c_search:
+            with st.form("admin_cancel"):
+                sid = st.number_input("Sale ID", min_value=1)
+                reason = st.text_input("Reason")
+                pw = st.text_input("Admin Password", type="password")
+                if st.form_submit_button("Cancel Order"):
+                    suc, msg = db.cancel_sale_transaction(sid, st.session_state['user'], "Admin", reason, pw)
+                    if suc: st.success(msg)
+                    else: st.error(msg)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_emp:
@@ -318,12 +340,89 @@ def admin_panel():
 
     with tab_settings:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.info("System Settings (Restricted)")
+        if st.session_state['role'] != 'Admin':
+            st.error("Restricted Area")
+        else:
+            with st.form("sys_settings"):
+                s_name = st.text_input("Store Name", value=db.get_setting("store_name"))
+                s_upi = st.text_input("UPI ID", value=db.get_setting("upi_id"))
+                s_tax = st.number_input("GST %", value=float(db.get_setting("tax_rate")))
+                if st.form_submit_button("Save Config"):
+                    db.set_setting("store_name", s_name)
+                    db.set_setting("upi_id", s_upi)
+                    db.set_setting("tax_rate", s_tax)
+                    st.success("Settings Saved!")
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with tab_cust:
+    with tab_users:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.dataframe(db.get_all_customers(), use_container_width=True)
+        if st.session_state['role'] != 'Admin':
+            st.error("Restricted Area")
+        else:
+            with st.expander("➕ Add New User"):
+                with st.form("add_user"):
+                    nu = st.text_input("Username")
+                    npw = st.text_input("Password", type="password")
+                    nr = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
+                    nf = st.text_input("Full Name")
+                    if st.form_submit_button("Create User"):
+                        if db.create_user(nu, npw, nr, nf): st.success("User Created")
+                        else: st.error("User exists or error")
+            
+            st.markdown("#### User List")
+            users = db.get_all_users()
+            for _, u in users.iterrows():
+                c1, c2 = st.columns([3, 1])
+                c1.write(f"**{u['username']}** ({u['role']}) - {u['status']}")
+                if u['username'] != st.session_state['user']:
+                    new_st = "Disabled" if u['status'] == "Active" else "Active"
+                    if c2.button(f"Set {new_st}", key=f"u_{u['username']}"):
+                        db.update_user_status(u['username'], new_st)
+                        st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_terms:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        if st.session_state['role'] != 'Admin':
+            st.error("Restricted Area")
+        else:
+            with st.expander("➕ Add Terminal"):
+                with st.form("add_term"):
+                    tid = st.text_input("Terminal ID")
+                    tn = st.text_input("Name")
+                    tl = st.text_input("Location")
+                    if st.form_submit_button("Add"):
+                        if db.add_terminal(tid, tn, tl): st.success("Added"); st.rerun()
+                        else: st.error("Error")
+            
+            terms = db.get_all_terminals_status()
+            st.dataframe(terms, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_coupons:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        with st.form("create_cpn"):
+            cc = st.text_input("Code")
+            ct = st.selectbox("Type", ["Flat", "%"])
+            cv = st.number_input("Value", min_value=1.0)
+            cm = st.number_input("Min Bill", min_value=0.0)
+            cd = st.number_input("Days Valid", min_value=1)
+            cl = st.number_input("Usage Limit", min_value=1)
+            cb = st.text_input("Bound Mobile (Optional)")
+            if st.form_submit_button("Create Coupon"):
+                b_mob = cb if cb else None
+                if db.create_coupon(cc, ct, cv, cm, cd, cl, b_mob): st.success("Created")
+                else: st.error("Error")
+        st.dataframe(db.get_all_coupons(), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_logs:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("📝 System Audit Logs")
+        st.dataframe(db.get_full_logs(), use_container_width=True)
+        st.markdown("#### 🚫 Cancellation Audit")
+        st.dataframe(db.get_cancellation_audit_log(), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
 def user_profile_page():
@@ -669,8 +768,14 @@ def pos_interface():
                                 "discount": discount + fest_disc + loss_discount,
                                 "points": st.session_state['points_to_redeem']
                             }
-                            st.session_state['checkout_stage'] = 'payment_method'
-                            st.rerun()
+                            
+                            # --- CRITICAL FIX: ZERO AMOUNT BYPASS ---
+                            if final_total <= 0:
+                                st.session_state['selected_payment_mode'] = "Free/Loyalty"
+                                finalize_sale(0, "Free/Loyalty")
+                            else:
+                                st.session_state['checkout_stage'] = 'payment_method'
+                                st.rerun()
             else:
                 st.info("Cart is empty")
                 st.button("Proceed to Pay", disabled=True)
@@ -695,6 +800,8 @@ def pos_interface():
             if st.button("Select UPI", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'UPI'
                 st.session_state['checkout_stage'] = 'payment_process'
+                st.session_state['qr_expiry'] = None 
+                st.session_state.pop('upi_txn_ref', None) 
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c3:
@@ -1224,9 +1331,10 @@ def main():
             st.markdown("---")
             
             role = st.session_state['role']
-            nav_opts = ["POS Terminal", "My Profile", "Documentation"]
-            if role in ["Admin", "Manager"]: nav_opts = ["POS Terminal", "Inventory", "Analytics", "Admin Panel", "My Profile", "Documentation"]
-            elif role == "Inventory Manager": nav_opts = ["Inventory", "My Profile", "Documentation"]
+            # REMOVED "Documentation" from UI navigation
+            nav_opts = ["POS Terminal", "My Profile"]
+            if role in ["Admin", "Manager"]: nav_opts = ["POS Terminal", "Inventory", "Analytics", "Admin Panel", "My Profile"]
+            elif role == "Inventory Manager": nav_opts = ["Inventory", "My Profile"]
             
             choice = st.radio("Navigate", nav_opts, label_visibility="collapsed")
             
@@ -1240,7 +1348,7 @@ def main():
         elif choice == "Analytics": analytics_dashboard()
         elif choice == "Admin Panel": admin_panel()
         elif choice == "My Profile": user_profile_page()
-        elif choice == "Documentation": render_docs()
+        # Documentation choice removed but logic remains in codebase
 
 if __name__ == "__main__":
     main()
