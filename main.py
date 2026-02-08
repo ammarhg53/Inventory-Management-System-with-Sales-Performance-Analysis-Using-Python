@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import os
 
 # Internal modules
-import db_core as db
+import database as db
 import utils
 import styles
 
@@ -65,39 +65,6 @@ if 'product_trie' not in st.session_state:
     trie, df_p = refresh_trie()
     st.session_state['product_trie'] = trie
     st.session_state['df_products'] = df_p
-
-# --- DOCUMENTATION MODULE (Logic Preserved, Removed from Nav) ---
-def render_docs():
-    st.title("📘 System Documentation & Developer Guide")
-    st.markdown("---")
-    
-    st.markdown("""
-    ### 1️⃣ Program Execution Flow
-    - **Entry Point**: `main.py` is the controller script.
-    - **Lifecycle**: Streamlit reruns the script on every interaction. State is preserved in `st.session_state`.
-    - **Authentication**: Checks `st.session_state['user']`. If None, renders `login_view()`.
-    
-    ### 2️⃣ Database Schema (SQLite)
-    - **products**: Inventory data (ID, name, stock, price).
-    - **sales**: Transaction history (JSON items, total, timestamps).
-    - **customers**: CRM data (mobile, spend, visits, segments).
-    - **logs**: Audit trail for all system actions.
-    
-    ### 3️⃣ POS Workflow
-    1. **Cart**: Add items via Search (Trie/Linear) or Barcode.
-    2. **Checkout**: Apply Coupons -> Redeem Points -> Calculate Tax.
-    3. **Payment**: Select Mode (Cash/UPI/Card) -> Verify.
-    4. **Finalize**: Atomic transaction (Stock -1, Sales +1, Receipt Gen).
-    
-    ### 4️⃣ Roles & Access Control
-    - **Admin**: Full access to settings, users, and logs.
-    - **Manager**: Analytics, Inventory, and Cancellations.
-    - **Operator**: POS Terminal only.
-    
-    ### 5️⃣ Analytics Logic
-    - **CLV (Customer Lifetime Value)**: Aggregates total spend per customer to segment them (New, Regular, High-Value).
-    - **Forecasting**: Uses Weighted Moving Average on daily sales.
-    """)
 
 # --- AUTHENTICATION MODULE ---
 def login_view():
@@ -239,213 +206,6 @@ def logout_user():
 
 # --- MODULES ---
 
-def inventory_manager():
-    st.title("📦 Master Inventory Management")
-    tab_view, tab_add, tab_restock, tab_reqs = st.tabs(["View & Edit", "Add New Product", "➕ Restock (Manual/QR)", "📋 Stock Requests"])
-    
-    conn = db.get_connection()
-    df = pd.read_sql("SELECT * FROM products", conn)
-    conn.close()
-    
-    with tab_view:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.markdown("### Product Database")
-        col_f1, col_f2 = st.columns(2)
-        cat_filter = col_f1.selectbox("Filter Category", ["All"] + db.get_categories_list())
-        search_txt = col_f2.text_input("Search Name")
-        df_filtered = df
-        if cat_filter != "All": df_filtered = df[df['category'] == cat_filter]
-        if search_txt: df_filtered = df_filtered[df_filtered['name'].str.contains(search_txt, case=False)]
-        
-        st.dataframe(df_filtered[['id', 'name', 'category', 'price', 'stock', 'expiry_date', 'is_dead_stock']], use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_add:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        with st.form("new_prod", clear_on_submit=True):
-            n = st.text_input("Product Name")
-            c = st.selectbox("Category", db.get_categories_list())
-            p = st.number_input("Selling Price", min_value=0.0)
-            cp = st.number_input("Cost Price", min_value=0.0)
-            s = st.number_input("Initial Stock", min_value=0)
-            has_expiry = st.radio("Has Expiry?", ["No", "Yes"], horizontal=True)
-            exp = None
-            if has_expiry == "Yes": exp = st.date_input("Expiry Date")
-            else: exp = "NA"
-            
-            if st.form_submit_button("Add Product"):
-                if db.add_product(n, c, p, s, cp, exp):
-                    st.success(f"Added: {n}")
-                else: st.error("Failed")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_restock:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        prod_opts = {f"{row['name']} (ID: {row['id']})": row['id'] for idx, row in df.iterrows()}
-        sel = st.selectbox("Select Product", list(prod_opts.keys()))
-        if sel: 
-            pid = prod_opts[sel]
-            qty = st.number_input("Add Quantity", min_value=1, value=10)
-            if st.button("Confirm Restock"):
-                db.restock_product(pid, qty)
-                st.success("Stock Updated!")
-                time.sleep(1)
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_reqs:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.dataframe(db.get_stock_requests(), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# --- RESTORED ADMIN PANEL ---
-def admin_panel():
-    st.title("🛡️ Admin Console")
-    # Extended tabs to restore full functionality
-    tab_dash, tab_emp, tab_settings, tab_users, tab_terms, tab_coupons, tab_logs = st.tabs([
-        "Controls", "Employees", "⚙️ Settings", "👥 Users", "🖥️ Terminals", "🎟️ Coupons", "📜 Logs"
-    ])
-    
-    with tab_dash:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if st.button("🔓 Force Unlock All Terminals"):
-            db.force_clear_all_sessions()
-            st.success("All session locks cleared.")
-        
-        st.markdown("### 🚫 Order Cancellation")
-        c_undo, c_search = st.columns(2)
-        with c_undo:
-            st.warning("Admin Override: Undo Last Sale")
-            if st.session_state['undo_stack']:
-                last_id = st.session_state['undo_stack'][-1]
-                if st.button(f"Undo Sale #{last_id}"):
-                    # Admin can fast-track undo logic here if needed, or use safe func
-                    st.info("Use search below for safer cancellation.")
-        with c_search:
-            with st.form("admin_cancel"):
-                sid = st.number_input("Sale ID", min_value=1)
-                reason = st.text_input("Reason")
-                pw = st.text_input("Admin Password", type="password")
-                if st.form_submit_button("Cancel Order"):
-                    suc, msg = db.cancel_sale_transaction(sid, st.session_state['user'], "Admin", reason, pw)
-                    if suc: st.success(msg)
-                    else: st.error(msg)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_emp:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("Employee Activity")
-        st.dataframe(db.get_employee_activity_live(), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_settings:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if st.session_state['role'] != 'Admin':
-            st.error("Restricted Area")
-        else:
-            with st.form("sys_settings"):
-                s_name = st.text_input("Store Name", value=db.get_setting("store_name"))
-                s_upi = st.text_input("UPI ID", value=db.get_setting("upi_id"))
-                s_tax = st.number_input("GST %", value=float(db.get_setting("tax_rate")))
-                if st.form_submit_button("Save Config"):
-                    db.set_setting("store_name", s_name)
-                    db.set_setting("upi_id", s_upi)
-                    db.set_setting("tax_rate", s_tax)
-                    st.success("Settings Saved!")
-                    st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_users:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if st.session_state['role'] != 'Admin':
-            st.error("Restricted Area")
-        else:
-            with st.expander("➕ Add New User"):
-                with st.form("add_user"):
-                    nu = st.text_input("Username")
-                    npw = st.text_input("Password", type="password")
-                    nr = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
-                    nf = st.text_input("Full Name")
-                    if st.form_submit_button("Create User"):
-                        if db.create_user(nu, npw, nr, nf): st.success("User Created")
-                        else: st.error("User exists or error")
-            
-            st.markdown("#### User List")
-            users = db.get_all_users()
-            for _, u in users.iterrows():
-                c1, c2 = st.columns([3, 1])
-                c1.write(f"**{u['username']}** ({u['role']}) - {u['status']}")
-                if u['username'] != st.session_state['user']:
-                    new_st = "Disabled" if u['status'] == "Active" else "Active"
-                    if c2.button(f"Set {new_st}", key=f"u_{u['username']}"):
-                        db.update_user_status(u['username'], new_st)
-                        st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_terms:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if st.session_state['role'] != 'Admin':
-            st.error("Restricted Area")
-        else:
-            with st.expander("➕ Add Terminal"):
-                with st.form("add_term"):
-                    tid = st.text_input("Terminal ID")
-                    tn = st.text_input("Name")
-                    tl = st.text_input("Location")
-                    if st.form_submit_button("Add"):
-                        if db.add_terminal(tid, tn, tl): st.success("Added"); st.rerun()
-                        else: st.error("Error")
-            
-            terms = db.get_all_terminals_status()
-            st.dataframe(terms, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_coupons:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        with st.form("create_cpn"):
-            cc = st.text_input("Code")
-            ct = st.selectbox("Type", ["Flat", "%"])
-            cv = st.number_input("Value", min_value=1.0)
-            cm = st.number_input("Min Bill", min_value=0.0)
-            cd = st.number_input("Days Valid", min_value=1)
-            cl = st.number_input("Usage Limit", min_value=1)
-            cb = st.text_input("Bound Mobile (Optional)")
-            if st.form_submit_button("Create Coupon"):
-                b_mob = cb if cb else None
-                if db.create_coupon(cc, ct, cv, cm, cd, cl, b_mob): st.success("Created")
-                else: st.error("Error")
-        st.dataframe(db.get_all_coupons(), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_logs:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("📝 System Audit Logs")
-        st.dataframe(db.get_full_logs(), use_container_width=True)
-        st.markdown("#### 🚫 Cancellation Audit")
-        st.dataframe(db.get_cancellation_audit_log(), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-def user_profile_page():
-    st.title("👤 My Profile")
-    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-    with st.form("profile_upd"):
-        new_name = st.text_input("Full Name", value=st.session_state['full_name'])
-        if st.form_submit_button("Update Profile"):
-            db.update_fullname(st.session_state['user'], new_name)
-            st.session_state['full_name'] = new_name
-            st.success("Updated")
-    
-    st.divider()
-    with st.form("pass_chg"):
-        old_p = st.text_input("Old Password", type="password")
-        new_p = st.text_input("New Password", type="password")
-        if st.form_submit_button("Change Password"):
-            if db.verify_password(st.session_state['user'], old_p):
-                db.update_password(st.session_state['user'], new_p)
-                st.success("Password Changed")
-            else: st.error("Incorrect Old Password")
-    st.markdown("</div>", unsafe_allow_html=True)
-
 def pos_interface():
     st.markdown("<div class='card-container'>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([3, 1, 1])
@@ -511,71 +271,38 @@ def pos_interface():
                     st.caption("No Clearance Items")
         
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
-            # --- FIX: STANDARDIZED MOBILE INPUT ---
-            col_cc, col_mob, col_search = st.columns([1, 2, 1])
-            
-            with col_cc:
-                # Default to +91
-                country_code = st.selectbox("Country Code", ["+91", "+1", "+44", "+971"], index=0, key="cc_select")
-                
-            with col_mob:
-                # Text input for number part
-                mob_val = ""
-                if st.session_state.get('current_customer'):
-                    # Strip code for display if possible, mostly cosmetic
-                    curr = st.session_state['current_customer']['mobile']
-                    if curr.startswith("+91"): mob_val = curr[3:]
-                    else: mob_val = curr # Show full if legacy or other
-                
-                mobile_input = st.text_input("Mobile Number (10 digits)", value=mob_val, max_chars=15).strip()
-
-            with col_search:
-                st.write("") # Spacer
+            col_c1, col_c2 = st.columns([2, 1])
+            with col_c1:
+                cust_phone = st.text_input("Customer Mobile", value=st.session_state['current_customer']['mobile'] if st.session_state['current_customer'] else "").strip()
+            with col_c2:
                 st.write("")
-                search_click = st.button("🔎 Search / Add")
-
-            if search_click:
-                if not mobile_input.isdigit():
-                    st.error("❌ Invalid mobile number. Digits only.")
-                elif len(mobile_input) != 10 and country_code == "+91":
-                    st.error("❌ Invalid mobile number. Please enter a valid Indian mobile number (10 digits).")
-                else:
-                    # Normalize: Always prepend country code for new lookups
-                    final_mobile = f"{country_code}{mobile_input}"
-                    
-                    # 1. Try finding standardized number
-                    cust = db.get_customer(final_mobile)
-                    
-                    # 2. Legacy Fallback (Preserve History)
-                    # If not found, and it's India, try looking up just the 10 digit number
-                    if not cust and country_code == "+91":
-                        cust = db.get_customer(mobile_input)
+                st.write("")
+                if st.button("🔎 Search / Add"):
+                    st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
+                    if cust_phone:
+                        cust = db.get_customer(cust_phone)
                         if cust:
-                            st.warning(f"⚠️ Found legacy record for {cust['name']}. Please update to +91 format in profile if needed.")
-                            # We use the record found, but internally we proceed.
-                            # Ideally, we would update the DB here, but "Add Only" constraint prefers minimal modification.
-                    
-                    if cust:
-                        st.session_state['current_customer'] = cust
-                        st.success(f"✅ Verified: {cust['name']} ({cust['segment']})")
-                    else:
-                        st.session_state['temp_new_customer'] = final_mobile
-                        st.warning(f"🆕 New Customer: {final_mobile}")
-
-            # New Customer Form
-            if st.session_state.get('temp_new_customer') and not st.session_state.get('current_customer'):
+                            st.session_state['current_customer'] = cust
+                            st.success(f"Welcome back, {cust['name']} ({cust['segment']} Member)")
+                            st.caption(f"Loyalty Points: {cust['loyalty_points']}")
+                        else:
+                            st.session_state['temp_new_customer'] = cust_phone
+                            st.warning("New Customer! Please enter details below.")
+            
+            if st.session_state.get('temp_new_customer') == cust_phone and not st.session_state['current_customer']:
                 with st.form("new_cust_form"):
-                    st.write(f"Registering: **{st.session_state['temp_new_customer']}**")
                     new_name = st.text_input("Full Name")
                     new_email = st.text_input("Email (Optional)")
                     if st.form_submit_button("Save Customer"):
                         if new_name:
-                            db.upsert_customer(st.session_state['temp_new_customer'], new_name, new_email)
-                            st.session_state['current_customer'] = db.get_customer(st.session_state['temp_new_customer'])
+                            db.upsert_customer(cust_phone, new_name, new_email)
+                            st.session_state['current_customer'] = db.get_customer(cust_phone)
                             st.session_state.pop('temp_new_customer', None)
-                            st.success("✅ Customer Added!")
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                            st.success("Customer Added!")
                             st.rerun()
                         else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
                             st.error("Name is required.")
 
         st.markdown("---")
@@ -768,14 +495,8 @@ def pos_interface():
                                 "discount": discount + fest_disc + loss_discount,
                                 "points": st.session_state['points_to_redeem']
                             }
-                            
-                            # --- CRITICAL FIX: ZERO AMOUNT BYPASS ---
-                            if final_total <= 0:
-                                st.session_state['selected_payment_mode'] = "Free/Loyalty"
-                                finalize_sale(0, "Free/Loyalty")
-                            else:
-                                st.session_state['checkout_stage'] = 'payment_method'
-                                st.rerun()
+                            st.session_state['checkout_stage'] = 'payment_method'
+                            st.rerun()
             else:
                 st.info("Cart is empty")
                 st.button("Proceed to Pay", disabled=True)
@@ -800,6 +521,8 @@ def pos_interface():
             if st.button("Select UPI", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'UPI'
                 st.session_state['checkout_stage'] = 'payment_process'
+                st.session_state['qr_expiry'] = None 
+                st.session_state.pop('upi_txn_ref', None) 
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c3:
@@ -835,9 +558,7 @@ def pos_interface():
         st.subheader(f"Processing {mode} Payment - Amount: {currency}{total:,.2f}")
         
         if mode == 'Cash':
-            # FIX: Use safe_float for large inputs or manual override
-            tendered = st.number_input("Amount Received from Customer", min_value=0.0, step=100.0, format="%.2f")
-            
+            tendered = st.number_input("Amount Received from Customer", min_value=0.0, step=10.0)
             if tendered > 0:
                 change = tendered - total
                 if change >= 0:
@@ -933,24 +654,7 @@ def pos_interface():
         with c_rec1:
             if 'last_receipt' in st.session_state:
                 st.markdown("""<style>.box-btn{border:1px solid #444; padding:15px; border-radius:10px; text-align:center; display:block; text-decoration:none; color:inherit; background:#222; margin:10px;}</style>""", unsafe_allow_html=True)
-                
-                # --- FIX: DYNAMIC RECEIPT NAME ---
-                cust_name = "Guest"
-                if st.session_state.get('current_customer'):
-                    cust_name = st.session_state['current_customer']['name'].replace(" ", "")
-                
-                ist_now = utils.get_system_time()
-                file_ts = ist_now.strftime("%Y-%m-%d")
-                
-                fname = f"{file_ts}_Sale_{cust_name}.pdf"
-                
-                st.download_button(
-                    "📄 Download Receipt PDF", 
-                    st.session_state['last_receipt'], 
-                    fname, 
-                    "application/pdf", 
-                    use_container_width=True
-                )
+                st.download_button("📄 Download Receipt PDF", st.session_state['last_receipt'], "receipt.pdf", "application/pdf", use_container_width=True)
         
         with c_rec2:
             if st.button("🛒 Start New Sale", type="primary", use_container_width=True):
@@ -972,7 +676,6 @@ def finalize_sale(total, mode):
         time.sleep(1.5)
 
     calc = st.session_state['final_calc']
-    # FIX: Use IST Time
     txn_time = utils.get_system_time().strftime("%Y-%m-%d %H:%M:%S")
     operator = st.session_state['full_name']
     customer = st.session_state['current_customer']
@@ -1037,16 +740,171 @@ def finalize_sale(total, mode):
         st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
         st.error(f"Transaction Failed: {str(e)}")
 
+def inventory_manager():
+    st.title("📦 Master Inventory Management")
+    tab_view, tab_add, tab_restock, tab_reqs, tab_metrics, tab_abc = st.tabs(["View & Edit", "Add New Product", "➕ Restock (Manual/QR)", "📋 Stock Requests", "Stock Metrics", "ABC Analysis"])
+    
+    conn = db.get_connection()
+    df = pd.read_sql("SELECT * FROM products", conn)
+    conn.close()
+    
+    with tab_view:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.markdown("### Product Database")
+        col_f1, col_f2 = st.columns(2)
+        # FIX 3: get_categories_list used here (provided by db module)
+        cat_filter = col_f1.selectbox("Filter Category", ["All"] + db.get_categories_list())
+        search_txt = col_f2.text_input("Search Name")
+        df_filtered = df
+        if cat_filter != "All": df_filtered = df[df['category'] == cat_filter]
+        if search_txt: df_filtered = df_filtered[df_filtered['name'].str.contains(search_txt, case=False)]
+        
+        st.dataframe(df_filtered[['id', 'name', 'category', 'price', 'stock', 'expiry_date', 'is_dead_stock']], use_container_width=True)
+        
+        col_dead_1, col_dead_2 = st.columns(2)
+        with col_dead_1:
+            st.markdown("##### 💀 Manage Dead Stock")
+            ds_id = st.number_input("Product ID", min_value=1, step=1, key="ds_pid")
+            ds_action = st.radio("Set Status", ["Active", "Dead Stock"], horizontal=True)
+            if st.button("Update Status"):
+                db.toggle_dead_stock(ds_id, ds_action == "Dead Stock")
+                st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                st.success("Status Updated")
+                time.sleep(1)
+                st.rerun()
+        
+        with col_dead_2:
+            st.markdown("##### 🖨️ Bulk QR Label Printing")
+            # FIX 6: Robust PDF Generation Call
+            if st.button("Generate QR Labels PDF (All Items)"):
+                try:
+                    with st.spinner("Generating QR Codes..."):
+                        pdf_bytes = utils.generate_qr_labels_pdf(df_filtered.to_dict('records'))
+                    st.download_button("⬇️ Download Labels PDF", pdf_bytes, "qr_labels.pdf", "application/pdf")
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(f"Error generating PDF: {e}")
+            
+            st.markdown("---")
+            st.markdown("##### Generate Single QR")
+            sel_prod_id = st.number_input("Enter Product ID to Generate QR", min_value=1, step=1)
+            if st.button("Generate QR"):
+                p_data = db.get_product_by_id(sel_prod_id)
+                if p_data:
+                    qr_bytes = utils.generate_product_qr_image(p_data['id'], p_data['name'])
+                    st.image(qr_bytes, caption=f"QR for {p_data['name']}")
+                else:
+                    st.error("Product ID not found")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_add:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        with st.form("new_prod", clear_on_submit=True):
+            n = st.text_input("Product Name")
+            c = st.selectbox("Category", db.get_categories_list())
+            p = st.number_input("Selling Price", min_value=0.0)
+            cp = st.number_input("Cost Price", min_value=0.0)
+            s = st.number_input("Initial Stock", min_value=0)
+            img_file = st.file_uploader("Product Image (Optional)", type=['png', 'jpg', 'jpeg'])
+            has_expiry = st.radio("Does this product have an expiry date?", ["Yes", "No"], index=0, horizontal=True)
+            exp = None
+            if has_expiry == "Yes":
+                exp = st.date_input("Expiry Date")
+            else:
+                exp = "NA"
+            
+            if st.form_submit_button("Add Product"):
+                img_bytes = img_file.getvalue() if img_file else None
+                if db.add_product(n, c, p, s, cp, exp, img_bytes):
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                    st.success(f"Product information stored successfully: {n}")
+                else: 
+                    st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                    st.error("Error adding product")
+        st.markdown("</div>", unsafe_allow_html=True)
+                    
+    with tab_restock:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        col_qr_re, col_man_re = st.columns(2)
+        with col_qr_re:
+            re_qr = st.text_input("Scan QR (PROD:ID)", key="restock_qr")
+            if re_qr:
+                pid = utils.parse_qr_input(re_qr)
+                if pid: st.session_state['restock_selected_id'] = pid
+        with col_man_re:
+            if not df.empty:
+                prod_opts = {f"{row['name']} (ID: {row['id']})": row['id'] for idx, row in df.iterrows()}
+                sel = st.selectbox("Select Product", list(prod_opts.keys()))
+                if sel: st.session_state['restock_selected_id'] = prod_opts[sel]
+        if 'restock_selected_id' in st.session_state:
+            pid = st.session_state['restock_selected_id']
+            p_curr = db.get_product_by_id(pid)
+            if p_curr:
+                st.divider()
+                st.write(f"**Selected:** {p_curr['name']} | **Current Stock:** {p_curr['stock']}")
+                qty = st.number_input("Add Quantity", min_value=1, value=10)
+                if st.button("Confirm Restock"):
+                    db.restock_product(pid, qty)
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                    st.success("Stock Updated!")
+                    time.sleep(1)
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_reqs:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        with st.form("req_form"):
+            r_pid = st.number_input("Product ID", min_value=1)
+            r_qty = st.number_input("Required Qty", min_value=1)
+            r_note = st.text_input("Reason / Notes")
+            if st.form_submit_button("Submit Request"):
+                prod = db.get_product_by_id(r_pid)
+                if prod:
+                    db.create_stock_request(r_pid, prod['name'], r_qty, r_note, st.session_state['user'])
+                    st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                    st.success("Request Submitted")
+                else: st.error("Invalid Product ID")
+        st.divider()
+        st.dataframe(db.get_stock_requests(), use_container_width=True)
+        
+        # Admin Action for Requests
+        reqs = db.get_stock_requests()
+        pending = reqs[reqs['status'] == 'Pending']
+        if not pending.empty and st.session_state['role'] in ['Admin', 'Inventory Manager']:
+             st.markdown("#### Pending Actions")
+             for _, r in pending.iterrows():
+                with st.expander(f"REQ #{r['id']}: {r['product_name']} ({r['quantity']})"):
+                    st.write(f"**User:** {r['requested_by']} | **Note:** {r['notes']}")
+                    c1, c2 = st.columns(2)
+                    if c1.button("✅ Approve", key=f"app_{r['id']}"):
+                         db.update_request_status(r['id'], "Approved"); st.rerun()
+                    if c2.button("❌ Reject", key=f"rej_{r['id']}"):
+                         db.update_request_status(r['id'], "Rejected"); st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_metrics:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        sales_df = db.get_sales_data()
+        metrics_df = utils.calculate_inventory_metrics(sales_df, df)
+        st.dataframe(metrics_df, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+    with tab_abc:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        abc_df = utils.calculate_abc_analysis(df)
+        st.dataframe(abc_df[['name', 'stock', 'inventory_value', 'abc_class']], use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
 def analytics_dashboard():
     st.title("📈 Enterprise Analytics")
     df_sales = db.get_sales_data()
     
     # FIX 3: Filter out cancelled transactions for charts
-    # STABILITY FIX: Added .copy() to prevent SettingWithCopyWarning
     if 'status' in df_sales.columns:
-        active_sales = df_sales[df_sales['status'] != 'Cancelled'].copy()
+        active_sales = df_sales[df_sales['status'] != 'Cancelled']
     else:
-        active_sales = df_sales.copy()
+        active_sales = df_sales
 
     conn = db.get_connection()
     df_prods = pd.read_sql("SELECT * FROM products", conn)
@@ -1067,9 +925,9 @@ def analytics_dashboard():
     val = total_rev/total_txns if total_txns > 0 else 0
     with m3: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Avg Order Value</div><div class='kpi-value'>{currency}{val:.0f}</div></div>", unsafe_allow_html=True)
 
-    t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
         "💰 Financials & P&L", "⚠️ Risk & Loss Prevention", "Sales Trends", "Staff Performance", 
-        "Demand Forecast", "Algorithm Showcase", "🏆 Rankings", "📊 Category Analysis", "💎 Customer Value (CLV)"
+        "Demand Forecast", "Algorithm Showcase", "🏆 Rankings", "📊 Category Analysis"
     ])
     
     with t1:
@@ -1280,27 +1138,450 @@ def analytics_dashboard():
         else:
             st.info("No category data available yet.")
         st.markdown("</div>", unsafe_allow_html=True)
-        
-    with t9:
+
+def admin_panel():
+    st.title("🛡️ Admin Console")
+    tab_dash, tab_emp_live, tab_cats, tab_settings, tab_cust, tab_term, tab_users, tab_req_app, tab_market, tab_txns, tab_logs = st.tabs([
+        "Controls", "👥 Employees (Live)", "Category", "⚙️ Settings", "👥 Customers", "🖥️ Terminals", "👤 Users", "📝 Stock Reqs", "🚀 Marketing", "📜 Transactions", "📝 Logs"
+    ])
+    
+    with tab_dash:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("💎 Customer Lifetime Value (CLV)")
-        clv_df = db.get_customer_clv_stats()
-        if not clv_df.empty:
-            # Top 10 Customers
-            st.markdown("#### 🌟 Top 10 High-Value Customers")
-            st.bar_chart(clv_df.head(10).set_index('name')['total_spend'])
-            
-            # Segment Distribution
-            st.markdown("#### 🥧 Customer Segmentation")
-            seg_counts = clv_df['segment'].value_counts()
-            fig, ax = plt.subplots(figsize=(6, 3))
-            seg_counts.plot(kind='barh', ax=ax, color=['#10b981', '#6366f1', '#f59e0b'])
-            st.pyplot(fig)
-            
-            st.dataframe(clv_df, use_container_width=True)
-        else:
-            st.info("No customer data available.")
+        c_live, c_unlock = st.columns(2)
+        with c_live:
+            # POINT 5: REAL-TIME SIMULATION
+            live_mode = st.checkbox("🔄 Enable Live Dashboard (Auto-Refresh 10s)")
+            if live_mode:
+                time.sleep(10)
+                st.rerun()
+        with c_unlock:
+            if st.button("🔓 Force Unlock All Terminals"):
+                db.force_clear_all_sessions()
+                st.success("All session locks cleared.")
+        
+        st.markdown("---")
+        
+        # FIX 7: UI for Cancellation with Password & Search
+        st.subheader("🚫 Order Cancellation & Reversal")
+        
+        c_undo, c_search = st.columns(2)
+        
+        with c_undo:
+            st.markdown("#### ↩️ Undo Last My Sale")
+            if st.session_state['undo_stack']:
+                last_sale_id = st.session_state['undo_stack'][-1]
+                st.warning(f"Target: Sale ID #{last_sale_id}")
+                
+                with st.form("undo_last_form"):
+                    u_reason = st.text_input("Cancellation Reason", placeholder="Reason is mandatory...")
+                    u_pass = st.text_input("Confirm Password", type="password")
+                    if st.form_submit_button("Confirm Undo"):
+                        success, msg = db.cancel_sale_transaction(last_sale_id, st.session_state['user'], st.session_state['role'], u_reason, u_pass)
+                        if success:
+                            st.session_state['redo_stack'].append(st.session_state['undo_stack'].pop())
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                            st.success(msg)
+                            time.sleep(1.5)
+                            st.rerun()
+                        else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                            st.error(f"Failed: {msg}")
+            else: st.info("No recent transactions in this session.")
+        
+        with c_search:
+            # New Feature: Search & Cancel for Managers/Admins
+            st.markdown("#### 🔎 Search & Cancel (Manager/Admin)")
+            if st.session_state['role'] in ['Manager', 'Admin']:
+                with st.form("search_cancel_form"):
+                    sc_id = st.number_input("Enter Sale ID", min_value=1, step=1)
+                    sc_reason = st.text_input("Cancellation Reason")
+                    sc_pass = st.text_input("Confirm Password", type="password")
+                    if st.form_submit_button("Search & Cancel"):
+                        success, msg = db.cancel_sale_transaction(sc_id, st.session_state['user'], st.session_state['role'], sc_reason, sc_pass)
+                        if success:
+                            st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
+                            st.success(msg)
+                        else:
+                            st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
+                            st.error(msg)
+            else:
+                st.info("Permission Restricted to Managers & Admins.")
+
+        st.markdown("---")
+        if st.button("Create System Backup"):
+            path = utils.backup_system()
+            if path: st.success(f"Backup: {path}")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_emp_live:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("🔴 Employee Live Monitor")
+        st.caption("Real-time activity tracking across all terminals")
+        
+        live_df = db.get_employee_activity_live()
+        
+        if not live_df.empty:
+            for i, row in live_df.iterrows():
+                is_online = pd.notna(row['current_pos']) and row['current_pos'] != ''
+                
+                status_html = ""
+                if is_online:
+                     status_html = f"<div class='status-dot-online'></div> Online @ {row['current_pos']}"
+                     bg_color = "rgba(16, 185, 129, 0.1)"
+                     border_l = "#10b981"
+                else:
+                     status_html = f"<div class='status-dot-offline'></div> Offline"
+                     bg_color = "rgba(255, 255, 255, 0.05)"
+                     border_l = "#94a3b8"
+                
+                st.markdown(f"""
+                <div style="background: {bg_color}; border-left: 4px solid {border_l}; border-radius: 8px; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <div style="font-weight: bold; font-size: 1.1rem;">{row['full_name']}</div>
+                        <div style="font-size: 0.85rem; opacity: 0.7;">{row['role']}</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-weight: bold; color: {border_l};">{status_html}</div>
+                        <div style="font-size: 0.85rem; margin-top: 5px;">Live Session Sales: {currency}{row['daily_sales']:,.2f}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No employee data found.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_cats:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        new_cat = st.text_input("New Category Name")
+        if st.button("Add Category"):
+            if db.add_category(new_cat): st.success("Category Added")
+            else: st.error("Failed")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_settings:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        if st.session_state['role'] != 'Admin':
+            st.error("⛔ Access Denied. Administrator privileges required.")
+        else:
+            with st.form("settings_form"):
+                s_name = st.text_input("Store Name", value=db.get_setting("store_name"))
+                s_upi = st.text_input("UPI ID (for QR)", value=db.get_setting("upi_id"))
+                col_s1, col_s2 = st.columns(2)
+                with col_s1: s_tax = st.number_input("GST Percentage (%)", value=float(db.get_setting("tax_rate")))
+                with col_s2: s_gst_enable = st.checkbox("Enable GST Billing", value=(db.get_setting("gst_enabled") == 'True'))
+                s_mode = st.selectbox("Default Bill Mode", ["GST Bill", "Non-GST Bill"], index=0 if db.get_setting("default_bill_mode") == "GST Bill" else 1)
+                uploaded_logo = st.file_uploader("Store Logo (PNG/JPG)", type=['png', 'jpg', 'jpeg'])
+                if st.form_submit_button("Save Settings"):
+                    db.set_setting("store_name", s_name)
+                    db.set_setting("upi_id", s_upi)
+                    db.set_setting("tax_rate", str(s_tax))
+                    db.set_setting("gst_enabled", str(s_gst_enable))
+                    db.set_setting("default_bill_mode", s_mode)
+                    if uploaded_logo:
+                        with open("logo.png", "wb") as f: f.write(uploaded_logo.getbuffer())
+                    db.log_activity(st.session_state['user'], "Settings Update", "System settings modified")
+                    st.success("Settings Saved!")
+                    time.sleep(1)
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_cust:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        cust_df = db.get_all_customers()
+        st.dataframe(cust_df, use_container_width=True)
+        if not cust_df.empty:
+            c1, c2 = st.columns(2)
+            c1.metric("Total Customers", len(cust_df))
+            c2.metric("Total Customer Spend", f"{currency}{cust_df['total_spend'].sum():,.2f}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_term:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        if st.session_state['role'] != 'Admin':
+            st.error("⛔ Access Denied. Administrator privileges required.")
+        else:
+            with st.expander("Add New Terminal"):
+                with st.form("add_term"):
+                    nt_id = st.text_input("Terminal ID (e.g., POS-3)")
+                    nt_name = st.text_input("Name (e.g., Upstairs)")
+                    nt_loc = st.text_input("Location")
+                    if st.form_submit_button("Create Terminal"):
+                        if db.add_terminal(nt_id, nt_name, nt_loc): st.success("Terminal Added"); st.rerun()
+                        else: st.error("Error creating terminal")
+            
+            # --- FIX: USE STATUS-AWARE DATAFRAME FOR ADMIN CONTROL ---
+            terms_status = db.get_all_terminals_status()
+            stats_df = db.get_terminal_stats()
+            
+            for _, t in terms_status.iterrows():
+                with st.container():
+                    c1, c2, c3 = st.columns([3, 1, 1])
+                    
+                    # Match stats
+                    t_stat = stats_df[stats_df['pos_id'] == t['id']]
+                    rev = 0
+                    cnt = 0
+                    if not t_stat.empty:
+                        rev = t_stat.iloc[0]['total_revenue']
+                        cnt = t_stat.iloc[0]['order_count']
+                    
+                    # VISUAL STATUS
+                    stat_icon = "🟢" if t['status'] == 'Active' else "🔴"
+                    if pd.notna(t['current_user']) and t['current_user'] != '':
+                        stat_icon = "🟡" # In Use
+                    
+                    c1.write(f"{stat_icon} **{t['name']}** ({t['id']}) - {t['location']}")
+                    c1.caption(f"Orders: {cnt} | Revenue: {currency}{rev:,.2f}")
+                    
+                    # Show active session details if locked
+                    if pd.notna(t['current_user']) and t['current_user'] != '':
+                         c1.warning(f"🔒 Locked by **{t['current_user']}** since {t['login_time']}")
+                         if c1.button(f"🔓 Force Unlock {t['id']}", key=f"unlock_{t['id']}"):
+                             db.force_unlock_terminal(t['id'])
+                             st.success(f"{t['id']} unlocked!")
+                             time.sleep(0.5)
+                             st.rerun()
+
+                    new_status = c2.selectbox("Status", ["Active", "Maintenance", "Error"], index=["Active", "Maintenance", "Error"].index(t['status']), key=f"status_{t['id']}")
+                    if new_status != t['status']:
+                        db.update_terminal_status(t['id'], new_status)
+                        st.toast("Status Updated")
+                        time.sleep(0.5)
+                        st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_users:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        if st.session_state['role'] != 'Admin':
+             st.error("⛔ Access Denied. Administrator privileges required.")
+        else:
+            with st.expander("Create New User"):
+                with st.form("new_user_form", clear_on_submit=True):
+                    nu_user = st.text_input("Username")
+                    nu_pass = st.text_input("Password", type="password")
+                    nu_name = st.text_input("Full Name")
+                    nu_role = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
+                    
+                    # Password Strength
+                    if nu_pass:
+                        score, label, color = utils.check_password_strength(nu_pass)
+                        st.markdown(f"<span style='color:{color}; font-weight:bold;'>Strength: {label}</span>", unsafe_allow_html=True)
+                    
+                    if st.form_submit_button("Create User"):
+                        if score < 2:
+                            st.error("Password is too weak!")
+                        elif db.create_user(nu_user, nu_pass, nu_role, nu_name): 
+                            db.log_activity(st.session_state['user'], "User Created", f"Created user {nu_user}")
+                            st.success(f"User '{nu_user}' created successfully")
+                        else: st.error("Error creating user")
+            
+            st.subheader("Manage User Status")
+            users = db.get_all_users()
+            for _, u in users.iterrows():
+                with st.container():
+                    c1, c2 = st.columns([4, 1])
+                    c1.write(f"**{u['username']}** ({u['role']}) - {u['status']}")
+                    
+                    if u['username'] != st.session_state['user']:
+                        new_stat = c2.selectbox("Status", ["Active", "Disabled"], index=0 if u['status'] == 'Active' else 1, key=f"u_stat_{u['username']}")
+                        if new_stat != u['status']:
+                            db.update_user_status(u['username'], new_stat)
+                            db.log_activity(st.session_state['user'], "User Status Update", f"Set {u['username']} to {new_stat}")
+                            st.toast(f"User {u['username']} updated to {new_stat}")
+                            time.sleep(0.5)
+                            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_req_app:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        reqs = db.get_stock_requests()
+        pending = reqs[reqs['status'] == 'Pending']
+        if not pending.empty and st.session_state['role'] in ['Admin', 'Inventory Manager']:
+             st.markdown("#### Pending Actions")
+             for _, r in pending.iterrows():
+                with st.expander(f"REQ #{r['id']}: {r['product_name']} ({r['quantity']})"):
+                    st.write(f"**User:** {r['requested_by']} | **Note:** {r['notes']}")
+                    c1, c2 = st.columns(2)
+                    if c1.button("✅ Approve", key=f"app_{r['id']}"):
+                         db.update_request_status(r['id'], "Approved"); st.rerun()
+                    if c2.button("❌ Reject", key=f"rej_{r['id']}"):
+                         db.update_request_status(r['id'], "Rejected"); st.rerun()
+
+        st.dataframe(reqs, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_market:
+        st.subheader("🚀 Retail Marketing Hub")
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        
+        with st.expander("🎟️ Create Discount Coupon"):
+            with st.form("new_coupon"):
+                cc_code = st.text_input("Coupon Code (e.g., SUMMER10)")
+                cc_type = st.selectbox("Type", ["Flat", "%"])
+                cc_val = st.number_input("Value", min_value=1.0)
+                cc_min = st.number_input("Min Bill Amount", min_value=0.0)
+                cc_days = st.number_input("Validity (Days)", min_value=1, value=30)
+                cc_lim = st.number_input("Total Usage Limit", min_value=1, value=100)
+                # Added Bound Mobile
+                cc_mob = st.text_input("Bound to Mobile (Optional)")
+                
+                if st.form_submit_button("Create Coupon"):
+                    bound = cc_mob if cc_mob else None
+                    if db.create_coupon(cc_code, cc_type, cc_val, cc_min, cc_days, cc_lim, bound_mobile=bound):
+                        st.success("Coupon Created!")
+                    else:
+                        st.error("Error creating coupon (Code might exist)")
+        
+        st.markdown("##### Active Coupons")
+        st.dataframe(db.get_all_coupons(), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("🎲 Lucky Draw System")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ld_days = st.number_input("Sales Lookback (Days)", min_value=1, value=7)
+        with c2:
+            ld_min = st.number_input("Min Spend Eligibility", min_value=100, value=1000)
+        with c3:
+            ld_prize = st.text_input("Prize Description", value="Mystery Gift Box")
+        
+        if st.button("🎰 Run Lucky Draw"):
+            with st.spinner("Analyzing sales data..."):
+                time.sleep(1.5)
+                winner = db.pick_lucky_winner(ld_days, ld_min, ld_prize)
+                if winner:
+                    st.markdown(utils.get_sound_html('celebration'), unsafe_allow_html=True)
+                    st.balloons()
+                    st.success(f"🎉 WINNER: {winner['name']} ({winner['mobile']})")
+                    st.markdown(f"**Prize Won:** {ld_prize}")
+                    db.log_activity(st.session_state['user'], "Lucky Draw", f"Winner selected: {winner['name']}")
+                else:
+                    st.warning("No eligible customers found for this criteria.")
+        
+        st.dataframe(db.get_lucky_draw_history(), use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("📢 Campaigns")
+        with st.form("new_campaign"):
+            cp_name = st.text_input("Campaign Name (e.g., Midnight Flash Sale)")
+            cp_type = st.selectbox("Type", ["Flash Sale", "Festival Offer"])
+            cp_start = st.text_input("Start Time (YYYY-MM-DD HH:MM:SS)", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            cp_end = st.text_input("End Time (YYYY-MM-DD HH:MM:SS)", value=(datetime.now() + pd.Timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"))
+            if st.form_submit_button("Launch Campaign"):
+                db.create_campaign(cp_name, cp_type, cp_start, cp_end, {})
+                st.success("Campaign Launched!")
+        
+        # Enhanced Campaign Display
+        camps = db.get_all_campaigns()
+        if not camps.empty:
+            now = datetime.now()
+            for _, cp in camps.iterrows():
+                start_dt = datetime.strptime(cp['start_time'], "%Y-%m-%d %H:%M:%S")
+                end_dt = datetime.strptime(cp['end_time'], "%Y-%m-%d %H:%M:%S")
+                is_active = start_dt <= now <= end_dt
+                
+                style_class = "campaign-active" if is_active else "campaign-expired"
+                status_txt = "ACTIVE" if is_active else "EXPIRED"
+                status_col = "#10b981" if is_active else "#94a3b8"
+                
+                st.markdown(f"""
+                <div class='{style_class}' style='padding:10px; border-radius:8px; background:rgba(255,255,255,0.05); margin-bottom:5px; border-left:4px solid {status_col};'>
+                    <strong>{cp['name']}</strong> ({cp['type']})<br>
+                    <span style='font-size:0.8em'>{cp['start_time']} - {cp['end_time']}</span>
+                    <div style='float:right; font-weight:bold; color:{status_col}'>{status_txt}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_txns:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        # FIX 5: Transaction Traceability
+        st.subheader("📜 Order & Payment Details")
+        
+        with st.expander("🔍 Search & Filters"):
+            col_t1, col_t2, col_t3 = st.columns(3)
+            f_bill = col_t1.number_input("Search Bill ID", min_value=0, value=0)
+            f_op = col_t2.text_input("Filter by Operator")
+            f_date = col_t3.text_input("Filter Date (YYYY-MM-DD)")
+        
+        filters = {}
+        if f_bill > 0: filters['bill_no'] = f_bill
+        if f_op: filters['operator'] = f_op
+        if f_date: filters['date'] = f_date
+        
+        txns = db.get_transaction_history(filters)
+        if not txns.empty:
+            st.dataframe(
+                txns[['id', 'timestamp', 'total_amount', 'status', 'payment_mode', 'operator', 'pos_id', 'customer_mobile', 'integrity_hash']], 
+                use_container_width=True
+            )
+        else:
+            st.info("No transactions found.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+    with tab_logs:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        # FIX 4: Logs View Control
+        st.subheader("📝 System Audit Logs")
+        
+        logs = db.get_full_logs()
+        
+        # Access Control for Logs
+        if st.session_state['role'] == 'Operator':
+            st.warning("Restricted View: General logs only.")
+        
+        # Cancellation Log Section - Visible to Admin/Manager
+        if st.session_state['role'] in ['Admin', 'Manager']:
+            st.markdown("#### 🚫 Cancelled Orders Audit")
+            cancel_audit = db.get_cancellation_audit_log()
+            if not cancel_audit.empty:
+                st.dataframe(cancel_audit, use_container_width=True)
+            else:
+                st.info("No cancellation events recorded.")
+            
+            st.markdown("---")
+            st.markdown("#### All System Logs")
+            st.dataframe(logs, use_container_width=True)
+        else:
+            # Operator view: Filter out cancellation details if sensitive, or just show general
+            st.markdown("#### My Activity")
+            op_logs = logs[logs['action'] != 'Undo Sale']
+            st.dataframe(op_logs, use_container_width=True)
+            
+        st.markdown("</div>", unsafe_allow_html=True)
+
+def user_profile_page():
+    st.title("👤 My Profile")
+    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+    with st.form("profile_upd"):
+        new_name = st.text_input("Full Name", value=st.session_state['full_name'])
+        if st.form_submit_button("Update Profile"):
+            db.update_fullname(st.session_state['user'], new_name)
+            st.session_state['full_name'] = new_name
+            db.log_activity(st.session_state['user'], "Profile Update", "Updated full name")
+            st.success("Updated")
+    st.divider()
+    st.subheader("Change Password")
+    with st.form("pass_chg"):
+        old_p = st.text_input("Old Password", type="password")
+        new_p = st.text_input("New Password", type="password")
+        
+        if new_p:
+            score, label, color = utils.check_password_strength(new_p)
+            st.markdown(f"<span style='color:{color}; font-weight:bold;'>Strength: {label}</span>", unsafe_allow_html=True)
+
+        if st.form_submit_button("Change Password"):
+            if db.verify_password(st.session_state['user'], old_p):
+                if score < 2:
+                    st.error("New password is too weak.")
+                else:
+                    db.update_password(st.session_state['user'], new_p)
+                    db.log_activity(st.session_state['user'], "Password Change", "Updated password")
+                    st.success("Password Changed Successfully")
+            else: st.error("Incorrect Old Password")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # --- MAIN CONTROLLER ---
 def main():
@@ -1329,7 +1610,6 @@ def main():
             st.markdown("---")
             
             role = st.session_state['role']
-            # REMOVED "Documentation" from UI navigation
             nav_opts = ["POS Terminal", "My Profile"]
             if role in ["Admin", "Manager"]: nav_opts = ["POS Terminal", "Inventory", "Analytics", "Admin Panel", "My Profile"]
             elif role == "Inventory Manager": nav_opts = ["Inventory", "My Profile"]
@@ -1346,7 +1626,6 @@ def main():
         elif choice == "Analytics": analytics_dashboard()
         elif choice == "Admin Panel": admin_panel()
         elif choice == "My Profile": user_profile_page()
-        # Documentation choice removed but logic remains in codebase
 
 if __name__ == "__main__":
     main()
