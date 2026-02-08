@@ -170,7 +170,7 @@ def init_db():
     try: c.execute("ALTER TABLE sales ADD COLUMN cancelled_by TEXT")
     except: pass
 
-    c.execute("DELETE FROM active_sessions")
+    # REMOVED: c.execute("DELETE FROM active_sessions") to allow persistent locks
 
     defaults = {
         "store_name": "SmartInventory Enterprise",
