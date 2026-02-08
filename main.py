@@ -224,7 +224,7 @@ def pos_interface():
     if not flash_sales.empty:
         fs = flash_sales.iloc[0]
         end_time = datetime.strptime(fs['end_time'], "%Y-%m-%d %H:%M:%S")
-        remaining = end_time - datetime.now()
+        remaining = end_time - utils.get_system_time()
         if remaining.total_seconds() > 0:
             mins, secs = divmod(int(remaining.total_seconds()), 60)
             hours, mins = divmod(mins, 60)
@@ -661,7 +661,7 @@ def finalize_sale(total, mode):
         time.sleep(1.5)
 
     calc = st.session_state['final_calc']
-    txn_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    txn_time = utils.get_system_time().strftime("%Y-%m-%d %H:%M:%S")
     operator = st.session_state['full_name']
     customer = st.session_state['current_customer']
     customer_mobile = customer['mobile'] if customer else None
@@ -909,6 +909,20 @@ def analytics_dashboard():
     
     with t1:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        
+        # --- POS WISE COLLECTION SUMMARY ---
+        st.subheader("🏦 POS-wise Collection Summary")
+        pos_summ = db.get_pos_collection_stats()
+        if not pos_summ.empty:
+            st.dataframe(pos_summ, use_container_width=True)
+            
+            # Pivot for better view
+            pivot_pos = pos_summ.pivot(index='pos_id', columns='payment_mode', values='total').fillna(0)
+            st.bar_chart(pivot_pos)
+        else:
+            st.info("No sales data available for breakdown.")
+
+        st.markdown("---")
         st.subheader("💰 Profit & Loss Statement")
         pl_summary, pl_df = utils.calculate_profit_loss(df_sales, df_prods) # Function handles filtering
         ratios = utils.calculate_financial_ratios(df_sales, df_prods)
@@ -991,11 +1005,22 @@ def analytics_dashboard():
         st.markdown("</div>", unsafe_allow_html=True)
     with t4:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        staff_stats = active_sales.groupby('operator').agg({'total_amount':'sum', 'id':'count', 'time_taken': 'mean'}).reset_index()
-        staff_stats.columns = ['Name', 'Revenue', 'Sales Count', 'Avg Time (s)']
-        staff_stats['Performance Score'] = (staff_stats['Revenue'] * 0.01) + (staff_stats['Sales Count'] * 10) - (staff_stats['Avg Time (s)'] * 0.5)
-        staff_stats = staff_stats.sort_values('Performance Score', ascending=False)
-        st.dataframe(staff_stats, use_container_width=True)
+        st.subheader("👥 Employee Efficiency & Performance")
+        
+        # New Performance Metrics
+        perf_stats = db.get_employee_performance_stats()
+        if not perf_stats.empty:
+            perf_stats['efficiency_score'] = (perf_stats['total_revenue'] * 0.001) + (perf_stats['txn_count'] * 2) - (perf_stats['avg_speed'] * 0.1)
+            perf_stats = perf_stats.sort_values('efficiency_score', ascending=False)
+            
+            st.dataframe(perf_stats, use_container_width=True)
+            
+            c1, c2 = st.columns(2)
+            c1.bar_chart(perf_stats.set_index('operator')['total_revenue'])
+            c2.bar_chart(perf_stats.set_index('operator')['avg_speed'])
+        else:
+            st.info("No performance data available.")
+            
         st.markdown("</div>", unsafe_allow_html=True)
     with t5:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
@@ -1090,7 +1115,9 @@ def analytics_dashboard():
 
 def admin_panel():
     st.title("🛡️ Admin Console")
-    tab_dash, tab_cats, tab_settings, tab_cust, tab_term, tab_users, tab_req_app, tab_market, tab_txns, tab_logs = st.tabs(["Controls", "Category", "⚙️ Settings", "👥 Customers", "🖥️ Terminals", "👤 Users", "📝 Stock Reqs", "🚀 Marketing", "📜 Transactions", "📝 Logs"])
+    tab_dash, tab_emp_live, tab_cats, tab_settings, tab_cust, tab_term, tab_users, tab_req_app, tab_market, tab_txns, tab_logs = st.tabs([
+        "Controls", "👥 Employees (Live)", "Category", "⚙️ Settings", "👥 Customers", "🖥️ Terminals", "👤 Users", "📝 Stock Reqs", "🚀 Marketing", "📜 Transactions", "📝 Logs"
+    ])
     
     with tab_dash:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
@@ -1151,6 +1178,43 @@ def admin_panel():
         if st.button("Create System Backup"):
             path = utils.backup_system()
             if path: st.success(f"Backup: {path}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_emp_live:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("🔴 Employee Live Monitor")
+        st.caption("Real-time activity tracking across all terminals")
+        
+        live_df = db.get_employee_activity_live()
+        
+        if not live_df.empty:
+            for i, row in live_df.iterrows():
+                is_online = pd.notna(row['current_pos']) and row['current_pos'] != ''
+                
+                status_html = ""
+                if is_online:
+                     status_html = f"<div class='status-dot-online'></div> Online @ {row['current_pos']}"
+                     bg_color = "rgba(16, 185, 129, 0.1)"
+                     border_l = "#10b981"
+                else:
+                     status_html = f"<div class='status-dot-offline'></div> Offline"
+                     bg_color = "rgba(255, 255, 255, 0.05)"
+                     border_l = "#94a3b8"
+                
+                st.markdown(f"""
+                <div style="background: {bg_color}; border-left: 4px solid {border_l}; border-radius: 8px; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <div style="font-weight: bold; font-size: 1.1rem;">{row['full_name']}</div>
+                        <div style="font-size: 0.85rem; opacity: 0.7;">{row['role']}</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-weight: bold; color: {border_l};">{status_html}</div>
+                        <div style="font-size: 0.85rem; margin-top: 5px;">Today's Sales: {currency}{row['daily_sales']:,.2f}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No employee data found.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_cats:
@@ -1228,7 +1292,12 @@ def admin_panel():
                         rev = t_stat.iloc[0]['total_revenue']
                         cnt = t_stat.iloc[0]['order_count']
                     
-                    c1.write(f"**{t['name']}** ({t['id']}) - {t['location']}")
+                    # VISUAL STATUS
+                    stat_icon = "🟢" if t['status'] == 'Active' else "🔴"
+                    if pd.notna(t['current_user']) and t['current_user'] != '':
+                        stat_icon = "🟡" # In Use
+                    
+                    c1.write(f"{stat_icon} **{t['name']}** ({t['id']}) - {t['location']}")
                     c1.caption(f"Orders: {cnt} | Revenue: {currency}{rev:,.2f}")
                     
                     # Show active session details if locked
@@ -1259,8 +1328,16 @@ def admin_panel():
                     nu_pass = st.text_input("Password", type="password")
                     nu_name = st.text_input("Full Name")
                     nu_role = st.selectbox("Role", ["Operator", "Manager", "Inventory Manager"])
+                    
+                    # Password Strength
+                    if nu_pass:
+                        score, label, color = utils.check_password_strength(nu_pass)
+                        st.markdown(f"<span style='color:{color}; font-weight:bold;'>Strength: {label}</span>", unsafe_allow_html=True)
+                    
                     if st.form_submit_button("Create User"):
-                        if db.create_user(nu_user, nu_pass, nu_role, nu_name): 
+                        if score < 2:
+                            st.error("Password is too weak!")
+                        elif db.create_user(nu_user, nu_pass, nu_role, nu_name): 
                             db.log_activity(st.session_state['user'], "User Created", f"Created user {nu_user}")
                             st.success(f"User '{nu_user}' created successfully")
                         else: st.error("Error creating user")
@@ -1324,19 +1401,23 @@ def admin_panel():
         
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("🎲 Lucky Draw System")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             ld_days = st.number_input("Sales Lookback (Days)", min_value=1, value=7)
         with c2:
             ld_min = st.number_input("Min Spend Eligibility", min_value=100, value=1000)
+        with c3:
+            ld_prize = st.text_input("Prize Description", value="Mystery Gift Box")
         
         if st.button("🎰 Run Lucky Draw"):
             with st.spinner("Analyzing sales data..."):
                 time.sleep(1.5)
-                winner = db.pick_lucky_winner(ld_days, ld_min)
+                winner = db.pick_lucky_winner(ld_days, ld_min, ld_prize)
                 if winner:
+                    st.markdown(utils.get_sound_html('celebration'), unsafe_allow_html=True)
                     st.balloons()
                     st.success(f"🎉 WINNER: {winner['name']} ({winner['mobile']})")
+                    st.markdown(f"**Prize Won:** {ld_prize}")
                     db.log_activity(st.session_state['user'], "Lucky Draw", f"Winner selected: {winner['name']}")
                 else:
                     st.warning("No eligible customers found for this criteria.")
@@ -1355,7 +1436,26 @@ def admin_panel():
                 db.create_campaign(cp_name, cp_type, cp_start, cp_end, {})
                 st.success("Campaign Launched!")
         
-        st.dataframe(db.get_active_campaigns(), use_container_width=True)
+        # Enhanced Campaign Display
+        camps = db.get_all_campaigns()
+        if not camps.empty:
+            now = datetime.now()
+            for _, cp in camps.iterrows():
+                start_dt = datetime.strptime(cp['start_time'], "%Y-%m-%d %H:%M:%S")
+                end_dt = datetime.strptime(cp['end_time'], "%Y-%m-%d %H:%M:%S")
+                is_active = start_dt <= now <= end_dt
+                
+                style_class = "campaign-active" if is_active else "campaign-expired"
+                status_txt = "ACTIVE" if is_active else "EXPIRED"
+                status_col = "#10b981" if is_active else "#94a3b8"
+                
+                st.markdown(f"""
+                <div class='{style_class}' style='padding:10px; border-radius:8px; background:rgba(255,255,255,0.05); margin-bottom:5px; border-left:4px solid {status_col};'>
+                    <strong>{cp['name']}</strong> ({cp['type']})<br>
+                    <span style='font-size:0.8em'>{cp['start_time']} - {cp['end_time']}</span>
+                    <div style='float:right; font-weight:bold; color:{status_col}'>{status_txt}</div>
+                </div>
+                """, unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_txns:
@@ -1430,11 +1530,19 @@ def user_profile_page():
     with st.form("pass_chg"):
         old_p = st.text_input("Old Password", type="password")
         new_p = st.text_input("New Password", type="password")
+        
+        if new_p:
+            score, label, color = utils.check_password_strength(new_p)
+            st.markdown(f"<span style='color:{color}; font-weight:bold;'>Strength: {label}</span>", unsafe_allow_html=True)
+
         if st.form_submit_button("Change Password"):
             if db.verify_password(st.session_state['user'], old_p):
-                db.update_password(st.session_state['user'], new_p)
-                db.log_activity(st.session_state['user'], "Password Change", "Updated password")
-                st.success("Password Changed Successfully")
+                if score < 2:
+                    st.error("New password is too weak.")
+                else:
+                    db.update_password(st.session_state['user'], new_p)
+                    db.log_activity(st.session_state['user'], "Password Change", "Updated password")
+                    st.success("Password Changed Successfully")
             else: st.error("Incorrect Old Password")
     st.markdown("</div>", unsafe_allow_html=True)
 
