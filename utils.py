@@ -700,7 +700,7 @@ class PDFReceipt(FPDF):
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None):
+def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None, new_coupon=None):
     logo_path = "logo.png" if os.path.exists("logo.png") else None
     
     pdf = PDFReceipt(store_name, logo_path)
@@ -765,6 +765,33 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     pdf.ln(10)
     pdf.cell(0, 5, f"Payment Mode: {mode}", 0, 1, 'L')
     pdf.cell(0, 5, "Terms: Non-refundable. Goods once sold cannot be returned.", 0, 1, 'C')
+    
+    # --- FIX 4: PRINT COUPON ---
+    if new_coupon:
+        pdf.ln(10)
+        pdf.set_line_width(0.5)
+        pdf.set_draw_color(100, 100, 100)
+        
+        # Dashed line workaround for FPDF
+        x = pdf.get_x()
+        y = pdf.get_y()
+        pdf.dashed_line(x, y, x + 190, y, 1, 1)
+        
+        pdf.ln(5)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(0, 8, "✂️ EXCLUSIVE OFFER FOR YOU ✂️", 0, 1, 'C')
+        
+        pdf.set_font("Courier", 'B', 14)
+        pdf.cell(0, 8, f"CODE: {new_coupon['code']}", 0, 1, 'C')
+        
+        pdf.set_font("Arial", '', 10)
+        val_text = f"{new_coupon['value']}%" if new_coupon['type'] == '%' else f"Rs {new_coupon['value']}"
+        pdf.cell(0, 6, f"Get {val_text} OFF on your next visit!", 0, 1, 'C')
+        pdf.cell(0, 5, f"Valid for {new_coupon['bound_mobile']} until {new_coupon['expiry']}", 0, 1, 'C')
+        
+        pdf.ln(5)
+        y = pdf.get_y()
+        pdf.dashed_line(x, y, x + 190, y, 1, 1)
     
     return pdf.output(dest='S').encode('latin-1')
 
