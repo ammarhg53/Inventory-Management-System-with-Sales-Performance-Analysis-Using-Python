@@ -272,22 +272,26 @@ def pos_interface():
                     st.caption("No Clearance Items")
         
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
-            # --- FIX: CUSTOMER MOBILE VALIDATION (+91) ---
+            # --- FIX: CUSTOMER MOBILE VALIDATION (+91, +965, +971, +966, +1) ---
             col_cc, col_mob, col_btn = st.columns([1, 2, 1])
             with col_cc:
-                country_code = st.selectbox("Code", ["+91"], disabled=True, key="cc_fixed")
+                # Country codes list as per requirement
+                country_codes = ["+91", "+965", "+971", "+966", "+1"]
+                country_code = st.selectbox("Country Code", country_codes, index=0)
             with col_mob:
-                cust_phone_input = st.text_input("Customer Mobile (10 Digits)", max_chars=10).strip()
+                cust_phone_input = st.text_input("Mobile Number", placeholder="e.g. 9876543210").strip()
             with col_btn:
                 st.write("")
                 st.write("")
                 if st.button("🔎 Search / Add"):
-                    if not cust_phone_input.isdigit() or len(cust_phone_input) != 10:
+                    # Validate mobile first
+                    is_valid, normalized_phone, msg = utils.validate_mobile_number(cust_phone_input, country_code)
+                    
+                    if not is_valid:
                         st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
-                        st.error("Invalid Mobile: Must be exactly 10 digits.")
+                        st.error(msg)
                     else:
                         st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                        normalized_phone = f"{country_code}{cust_phone_input}"
                         
                         # Search Normalized first
                         cust = db.get_customer(normalized_phone)
@@ -956,8 +960,33 @@ def analytics_dashboard():
     except:
         st.error("Date parsing failed. Check DB format.")
         return
-    total_rev = active_sales['total_amount'].sum()
-    total_txns = len(active_sales)
+    
+    # --- ADD FILTER SECTION HERE ---
+    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+    st.markdown("### 🗓️ Time & Performance Filters")
+    
+    col_date1, col_date2 = st.columns([1, 3])
+    
+    min_date = active_sales['date'].min().date() if not active_sales.empty else datetime.now().date()
+    max_date = active_sales['date'].max().date() if not active_sales.empty else datetime.now().date()
+    
+    with col_date1:
+        date_range = st.date_input("Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+    
+    # Filter Data based on selection
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_d, end_d = date_range
+        mask = (active_sales['date'].dt.date >= start_d) & (active_sales['date'].dt.date <= end_d)
+        filtered_sales = active_sales.loc[mask]
+    else:
+        filtered_sales = active_sales
+
+    st.caption(f"Showing data from {len(filtered_sales)} transactions")
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Use filtered data for subsequent calculations
+    total_rev = filtered_sales['total_amount'].sum()
+    total_txns = len(filtered_sales)
     
     m1, m2, m3 = st.columns(3)
     with m1: st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Total Revenue</div><div class='kpi-value'>{currency}{total_rev:,.0f}</div></div>", unsafe_allow_html=True)
@@ -975,13 +1004,14 @@ def analytics_dashboard():
         
         # --- POS WISE COLLECTION SUMMARY ---
         st.subheader("🏦 POS-wise Collection Summary")
-        pos_summ = db.get_pos_collection_stats()
-        if not pos_summ.empty:
-            st.dataframe(pos_summ, use_container_width=True)
+        # Note: POS stats query is aggregated in SQL, so it might not reflect date filters perfectly without SQL change.
+        # For strict correctness with filters, we can aggregate from filtered_sales dataframe.
+        if not filtered_sales.empty:
+            pos_summ_df = filtered_sales.groupby(['pos_id', 'payment_mode'])['total_amount'].sum().reset_index()
+            st.dataframe(pos_summ_df, use_container_width=True)
             
-            # Pivot for better view
             try:
-                pivot_pos = pos_summ.pivot(index='pos_id', columns='payment_mode', values='total').fillna(0)
+                pivot_pos = pos_summ_df.pivot(index='pos_id', columns='payment_mode', values='total_amount').fillna(0)
                 st.bar_chart(pivot_pos)
             except:
                 st.info("Insufficient data for pivot chart.")
@@ -990,9 +1020,9 @@ def analytics_dashboard():
 
         st.markdown("---")
         st.subheader("💰 Profit & Loss Statement (Enhanced)")
-        # Calculate with new marketing expense logic
-        pl_summary, pl_df = utils.calculate_profit_loss(df_sales, df_prods) # Function handles filtering
-        ratios = utils.calculate_financial_ratios(df_sales, df_prods)
+        # Calculate with new marketing expense logic using FILTERED data
+        pl_summary, pl_df = utils.calculate_profit_loss(filtered_sales, df_prods) 
+        ratios = utils.calculate_financial_ratios(filtered_sales, df_prods)
         
         c_pl1, c_pl2, c_pl3, c_pl4 = st.columns(4)
         c_pl1.metric("Gross Revenue", f"{currency}{pl_summary['total_revenue']:,.2f}", help="Total Sales Value (List Price)")
@@ -1048,7 +1078,8 @@ def analytics_dashboard():
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         c_trend1, c_trend2 = st.columns(2)
         
-        daily = active_sales.groupby(active_sales['date'].dt.date)['total_amount'].sum().reset_index()
+        # Use filtered sales for trends
+        daily = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().reset_index()
         trend_dir = utils.analyze_trend_slope(daily['total_amount'].values)
         st.info(f"Market Trend (Algo #32): {trend_dir}")
         
@@ -1058,15 +1089,15 @@ def analytics_dashboard():
             
         with c_trend2:
             st.markdown("#### 💳 Payment Method Usage")
-            pay_dist = active_sales['payment_mode'].value_counts()
+            pay_dist = filtered_sales['payment_mode'].value_counts()
             fig, ax = plt.subplots()
             ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%', startangle=90, colors=['#6366f1', '#10b981', '#f59e0b'])
             ax.axis('equal') 
             st.pyplot(fig)
             
         st.markdown("#### 📆 Monthly Sales Trend")
-        active_sales['month'] = active_sales['date'].dt.to_period('M').astype(str)
-        monthly = active_sales.groupby('month')['total_amount'].sum()
+        filtered_sales['month'] = filtered_sales['date'].dt.to_period('M').astype(str)
+        monthly = filtered_sales.groupby('month')['total_amount'].sum()
         st.bar_chart(monthly)
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1074,8 +1105,13 @@ def analytics_dashboard():
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("👥 Employee Efficiency & Performance")
         
-        # New Performance Metrics
-        perf_stats = db.get_employee_performance_stats()
+        # Aggregate manually from filtered data for accuracy
+        perf_stats = filtered_sales.groupby('operator').agg(
+            txn_count=('id', 'count'),
+            total_revenue=('total_amount', 'sum'),
+            avg_speed=('time_taken', 'mean')
+        ).reset_index()
+        
         if not perf_stats.empty:
             perf_stats['efficiency_score'] = (perf_stats['total_revenue'] * 0.001) + (perf_stats['txn_count'] * 2) - (perf_stats['avg_speed'] * 0.1)
             perf_stats = perf_stats.sort_values('efficiency_score', ascending=False)
@@ -1091,8 +1127,8 @@ def analytics_dashboard():
         st.markdown("</div>", unsafe_allow_html=True)
     with t5:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        if not active_sales.empty:
-            daily = active_sales.groupby(active_sales['date'].dt.date)['total_amount'].sum().reset_index()
+        if not filtered_sales.empty:
+            daily = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().reset_index()
             daily_vals = daily['total_amount'].values
             prediction = utils.forecast_next_period(daily_vals)
             c1, c2 = st.columns(2)
@@ -1133,7 +1169,7 @@ def analytics_dashboard():
             conn = db.get_connection()
             df_p = pd.read_sql("SELECT * FROM products", conn)
             conn.close()
-            rank_df = utils.rank_products(df_sales, df_p)
+            rank_df = utils.rank_products(filtered_sales, df_p)
             if not rank_df.empty: st.dataframe(rank_df[['rank', 'name', 'qty_sold', 'score']], hide_index=True)
             else: st.info("No sales data for ranking.")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1143,26 +1179,40 @@ def analytics_dashboard():
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### 🏆 Best POS Operators")
-            staff_rank = active_sales.groupby('operator')['total_amount'].sum().reset_index().sort_values('total_amount', ascending=False)
+            staff_rank = filtered_sales.groupby('operator')['total_amount'].sum().reset_index().sort_values('total_amount', ascending=False)
             st.dataframe(staff_rank.style.highlight_max(axis=0), use_container_width=True)
         with c2:
             st.markdown("#### ⚡ Fastest Checkouts")
-            fast_op = active_sales.groupby('operator')['time_taken'].mean().reset_index().sort_values('time_taken')
+            fast_op = filtered_sales.groupby('operator')['time_taken'].mean().reset_index().sort_values('time_taken')
             st.dataframe(fast_op, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
     with t8:
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         st.subheader("📊 Category Performance Analysis")
-        cat_perf = db.get_category_performance()
-        if not cat_perf.empty:
+        # Recalculate category performance based on filtered sales
+        cat_perf_df = pd.DataFrame()
+        if not filtered_sales.empty:
+            cat_sales = {}
+            prod_cat_map = df_prods.set_index('id')['category'].to_dict()
+            for _, row in filtered_sales.iterrows():
+                try:
+                    item_ids = json.loads(row['items_json'])
+                    for iid in item_ids:
+                        cat = prod_cat_map.get(iid, "Unknown")
+                        share = row['total_amount'] / len(item_ids) 
+                        cat_sales[cat] = cat_sales.get(cat, 0) + share
+                except: continue
+            cat_perf_df = pd.DataFrame(list(cat_sales.items()), columns=['Category', 'Revenue']).sort_values('Revenue', ascending=False)
+
+        if not cat_perf_df.empty:
             c1, c2 = st.columns([2, 1])
             with c1:
                 # FIX 2: Pie Chart Improvements
                 fig, ax = plt.subplots(figsize=(6, 6))
                 
                 wedges, texts, autotexts = ax.pie(
-                    cat_perf['Revenue'], 
-                    labels=cat_perf['Category'], 
+                    cat_perf_df['Revenue'], 
+                    labels=cat_perf_df['Category'], 
                     autopct='%1.1f%%', 
                     startangle=90, 
                     pctdistance=0.85,
@@ -1171,11 +1221,11 @@ def analytics_dashboard():
                 
                 plt.setp(texts, size=9)
                 plt.setp(autotexts, size=8, weight="bold", color="white")
-                ax.legend(wedges, cat_perf['Category'], title="Categories", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
+                ax.legend(wedges, cat_perf_df['Category'], title="Categories", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
                 ax.axis('equal')
                 st.pyplot(fig)
             with c2:
-                st.dataframe(cat_perf, use_container_width=True)
+                st.dataframe(cat_perf_df, use_container_width=True)
         else:
             st.info("No category data available yet.")
         st.markdown("</div>", unsafe_allow_html=True)
