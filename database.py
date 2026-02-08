@@ -246,6 +246,8 @@ def set_setting(key, value):
     conn.close()
 
 def log_activity(user, action, details):
+    # NOTE: Timestamps here will rely on local server time unless utils.get_system_time() is passed in 'timestamp' arg.
+    # In main.py, we typically format the time before passing here, or this function uses local now.
     conn = get_connection()
     c = conn.cursor()
     c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
@@ -256,6 +258,14 @@ def log_activity(user, action, details):
 def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer_mobile, 
                              tax_amount, discount_amount, coupon_code, points_redeemed, 
                              points_earned, integrity_hash, time_taken):
+    """
+    Records a sale transaction.
+    Atomic Updates:
+    1. Inventory decrement
+    2. Coupon usage
+    3. Sale record insertion
+    4. Customer loyalty & spend update (CLV logic)
+    """
     conn = get_connection()
     c = conn.cursor()
     sale_id = None
@@ -267,6 +277,8 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
             c.execute("UPDATE coupons SET used_count = used_count + 1 WHERE code=?", (coupon_code,))
 
         items_json = json.dumps([i['id'] for i in cart_items])
+        
+        # NOTE: Time here relies on system time. For IST, ensure system timezone is set or pass IST from main.py
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
@@ -285,6 +297,7 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                 curr_spend, curr_points = res
                 new_spend = curr_spend + total
                 
+                # CLV Segmentation Logic
                 new_seg = "New"
                 if new_spend > 50000: new_seg = "High-Value"
                 elif new_spend > 10000: new_seg = "Regular"
@@ -463,6 +476,22 @@ def upsert_customer(mobile, name, email):
 def get_all_customers():
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM customers", conn)
+    conn.close()
+    return df
+
+def get_customer_clv_stats():
+    """
+    Fetches customer data for CLV analysis.
+    Aggregates spend, visits, and segments.
+    Used for: Business Intelligence & Admin Analytics.
+    """
+    conn = get_connection()
+    query = """
+    SELECT name, mobile, total_spend, visits, segment 
+    FROM customers 
+    ORDER BY total_spend DESC
+    """
+    df = pd.read_sql(query, conn)
     conn.close()
     return df
 
