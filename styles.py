@@ -176,6 +176,29 @@ def load_css(theme="dark"):
             font-size: 0.75rem; font-weight: 600; background: var(--secondary-bg); border: 1px solid var(--border-color);
         }}
 
+        /* --- ANIMATIONS & STATUS --- */
+        @keyframes pulse-green {{
+            0% {{ box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }}
+            70% {{ box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }}
+            100% {{ box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }}
+        }}
+
+        .status-dot-online {{
+            height: 10px; width: 10px; background-color: {success_color};
+            border-radius: 50%; display: inline-block; margin-right: 5px;
+            animation: pulse-green 2s infinite;
+        }}
+
+        .status-dot-busy {{
+            height: 10px; width: 10px; background-color: {warning_color};
+            border-radius: 50%; display: inline-block; margin-right: 5px;
+        }}
+        
+        .status-dot-offline {{
+             height: 10px; width: 10px; background-color: {muted_text};
+             border-radius: 50%; display: inline-block; margin-right: 5px;
+        }}
+
         /* --- LOGIN PAGE --- */
         .login-box {{
             background: var(--card-bg); backdrop-filter: blur(24px); padding: 48px;
@@ -195,6 +218,11 @@ def load_css(theme="dark"):
         @keyframes pulse {{
             0% {{ transform: scale(1); }} 50% {{ transform: scale(1.02); }} 100% {{ transform: scale(1); }}
         }}
+        
+        /* --- CAMPAIGNS --- */
+        .campaign-active {{ border: 2px solid {success_color}; }}
+        .campaign-expired {{ filter: grayscale(1); opacity: 0.6; }}
+
     </style>
     """, unsafe_allow_html=True)
 
