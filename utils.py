@@ -532,21 +532,35 @@ def rank_products(df_sales, df_products):
         
     return pd.DataFrame(ranking_data)
 
-# --- PROFIT & LOSS ANALYSIS ---
+# --- PROFIT & LOSS ANALYSIS (ENHANCED) ---
 def calculate_profit_loss(df_sales, df_products):
+    """
+    Calculates P&L including Promotional Expenses.
+    Logic:
+    Gross Revenue = Sum of Product List Prices (Theoretical)
+    Marketing Expense = Transaction Discounts + Loyalty Redemptions
+    Net Revenue = Gross Revenue - Marketing Expense (Actual Collected)
+    Profit = Net Revenue - Total COGS
+    """
     if df_sales.empty or df_products.empty:
-        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0, "margin_percent": 0}, pd.DataFrame()
+        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0, "margin_percent": 0, "marketing_expense": 0}, pd.DataFrame()
 
-    # FIX 3: STRICT FINANCIAL ACCURACY - Exclude Cancelled Orders
+    # FIX: STRICT FINANCIAL ACCURACY - Exclude Cancelled Orders
     if 'status' in df_sales.columns:
         active_sales = df_sales[df_sales['status'] != 'Cancelled']
     else:
         active_sales = df_sales
 
+    # --- Marketing & Promotional Cost Accounting ---
+    # Sum up discounts given at transaction level
+    total_discount_given = active_sales['discount_amount'].sum() if 'discount_amount' in active_sales.columns else 0
+    total_loyalty_redeemed = active_sales['points_redeemed'].sum() if 'points_redeemed' in active_sales.columns else 0
+    marketing_expense = total_discount_given + total_loyalty_redeemed
+
     prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
     
     category_pl = {}
-    total_rev = 0
+    gross_rev = 0
     total_cost = 0
 
     for _, row in active_sales.iterrows():
@@ -558,21 +572,27 @@ def calculate_profit_loss(df_sales, df_products):
                     cp = p['cost_price']
                     sp = p['price']
                     
-                    profit = sp - cp
-                    
-                    total_rev += sp
+                    gross_rev += sp
                     total_cost += cp
+                    
+                    # Category level is gross profit (list price - cost)
+                    # Discounts are usually transaction level, hard to attribute to specific item without complex logic
+                    profit_gross = sp - cp
                     
                     cat = p['category']
                     if cat not in category_pl:
                         category_pl[cat] = {'revenue': 0, 'cost': 0, 'profit': 0}
                     category_pl[cat]['revenue'] += sp
                     category_pl[cat]['cost'] += cp
-                    category_pl[cat]['profit'] += profit
+                    category_pl[cat]['profit'] += profit_gross
                     
         except: continue
 
-    net_profit = total_rev - total_cost
+    # Net Revenue is what we actually collected
+    net_revenue = gross_rev - marketing_expense
+    
+    # Net Profit
+    net_profit = net_revenue - total_cost
     
     pl_data = []
     for cat, metrics in category_pl.items():
@@ -580,15 +600,17 @@ def calculate_profit_loss(df_sales, df_products):
             "Category": cat,
             "Revenue": metrics['revenue'],
             "Cost": metrics['cost'],
-            "Profit": metrics['profit'],
+            "Profit": metrics['profit'], # Note: This is Gross Profit per category
             "Margin %": (metrics['profit'] / metrics['revenue'] * 100) if metrics['revenue'] > 0 else 0
         })
     
     return {
         "net_profit": net_profit, 
-        "total_revenue": total_rev, 
+        "total_revenue": gross_rev, # Gross Revenue (List Price)
+        "net_revenue": net_revenue, # Collected
         "total_cost": total_cost,
-        "margin_percent": (net_profit / total_rev * 100) if total_rev > 0 else 0
+        "marketing_expense": marketing_expense,
+        "margin_percent": (net_profit / net_revenue * 100) if net_revenue > 0 else 0
     }, pd.DataFrame(pl_data)
 
 def analyze_risk_inventory(df_products):
@@ -708,21 +730,33 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     
     pdf.set_font("Arial", size=10)
     
-    pdf.cell(100, 6, f"Receipt No: #{txn_id}", 0, 0)
-    pdf.cell(0, 6, f"Date: {time_str}", 0, 1, 'R')
-    pdf.cell(100, 6, f"Cashier: {operator}", 0, 0)
-    pdf.cell(0, 6, f"POS: {pos}", 0, 1, 'R')
-    pdf.cell(100, 6, f"Payment Mode: {mode}", 0, 1, 'L')
+    # --- FIX: LATIN-1 ENCODING SAFETY HELPER ---
+    def clean_text(text):
+        """
+        Sanitizes text for FPDF Latin-1 encoding.
+        Replaces '₹' with 'Rs.' and handles other unicodes.
+        """
+        if not text: return ""
+        text = str(text)
+        text = text.replace("₹", "Rs. ")
+        # Encode to latin-1 replacing errors with '?', then decode back
+        return text.encode('latin-1', 'replace').decode('latin-1')
+
+    pdf.cell(100, 6, clean_text(f"Receipt No: #{txn_id}"), 0, 0)
+    pdf.cell(0, 6, clean_text(f"Date: {time_str}"), 0, 1, 'R')
+    pdf.cell(100, 6, clean_text(f"Cashier: {operator}"), 0, 0)
+    pdf.cell(0, 6, clean_text(f"POS: {pos}"), 0, 1, 'R')
+    pdf.cell(100, 6, clean_text(f"Payment Mode: {mode}"), 0, 1, 'L')
     
     if customer:
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(0, 6, "Customer Details:", 0, 1, 'L')
         pdf.set_font("Arial", '', 10)
-        pdf.cell(0, 5, f"Name: {customer.get('name', 'N/A')}", 0, 1)
-        pdf.cell(0, 5, f"Mobile: {customer.get('mobile', 'N/A')}", 0, 1)
+        pdf.cell(0, 5, clean_text(f"Name: {customer.get('name', 'N/A')}"), 0, 1)
+        pdf.cell(0, 5, clean_text(f"Mobile: {customer.get('mobile', 'N/A')}"), 0, 1)
         if customer.get('loyalty_points'):
-            pdf.cell(0, 5, f"Loyalty Balance: {customer.get('loyalty_points')} Pts", 0, 1)
+            pdf.cell(0, 5, clean_text(f"Loyalty Balance: {customer.get('loyalty_points')} Pts"), 0, 1)
 
     pdf.ln(5)
     
@@ -743,8 +777,7 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
             item_summary[i['name']] = {'price': i['price'], 'qty': 1, 'total': i['price']}
             
     for name, data in item_summary.items():
-        sanitized_name = name.encode('latin-1', 'replace').decode('latin-1')
-        pdf.cell(100, 7, sanitized_name, 1)
+        pdf.cell(100, 7, clean_text(name), 1)
         pdf.cell(30, 7, f"{data['price']:.2f}", 1, 0, 'C')
         pdf.cell(20, 7, str(data['qty']), 1, 0, 'C')
         pdf.cell(40, 7, f"{data['total']:.2f}", 1, 1, 'R')
@@ -752,18 +785,17 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
     pdf.ln(5)
     pdf.set_font("Arial", '', 10)
     
-    subtotal = total
     if tax_info and tax_info.get('tax_amount', 0) > 0:
         pdf.cell(150, 6, f"GST ({tax_info['tax_percent']}%)", 0, 0, 'R')
         pdf.cell(40, 6, f"{tax_info['tax_amount']:.2f}", 1, 1, 'R')
 
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(150, 8, "NET TOTAL", 0, 0, 'R')
-    pdf.cell(40, 8, f"Rs {total:.2f}", 1, 1, 'R')
+    pdf.cell(40, 8, clean_text(f"Rs. {total:.2f}"), 1, 1, 'R')
     
     pdf.set_font("Arial", '', 9)
     pdf.ln(10)
-    pdf.cell(0, 5, f"Payment Mode: {mode}", 0, 1, 'L')
+    pdf.cell(0, 5, clean_text(f"Payment Mode: {mode}"), 0, 1, 'L')
     pdf.cell(0, 5, "Terms: Non-refundable. Goods once sold cannot be returned.", 0, 1, 'C')
     
     # --- FIX 4: PRINT COUPON ---
@@ -779,15 +811,15 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
         
         pdf.ln(5)
         pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 8, "✂️ EXCLUSIVE OFFER FOR YOU ✂️", 0, 1, 'C')
+        pdf.cell(0, 8, clean_text("✂️ EXCLUSIVE OFFER FOR YOU ✂️"), 0, 1, 'C')
         
         pdf.set_font("Courier", 'B', 14)
-        pdf.cell(0, 8, f"CODE: {new_coupon['code']}", 0, 1, 'C')
+        pdf.cell(0, 8, clean_text(f"CODE: {new_coupon['code']}"), 0, 1, 'C')
         
         pdf.set_font("Arial", '', 10)
         val_text = f"{new_coupon['value']}%" if new_coupon['type'] == '%' else f"Rs {new_coupon['value']}"
-        pdf.cell(0, 6, f"Get {val_text} OFF on your next visit!", 0, 1, 'C')
-        pdf.cell(0, 5, f"Valid for {new_coupon['bound_mobile']} until {new_coupon['expiry']}", 0, 1, 'C')
+        pdf.cell(0, 6, clean_text(f"Get {val_text} OFF on your next visit!"), 0, 1, 'C')
+        pdf.cell(0, 5, clean_text(f"Valid for {new_coupon['bound_mobile']} until {new_coupon['expiry']}"), 0, 1, 'C')
         
         pdf.ln(5)
         y = pdf.get_y()
