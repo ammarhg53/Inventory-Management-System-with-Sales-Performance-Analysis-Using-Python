@@ -243,10 +243,22 @@ def pos_interface():
             st.markdown("### 📢 Marketing & Offers")
             st.info("Available Coupons for Customers")
             active_coupons = db.get_all_coupons()
-            if not active_coupons.empty:
-                st.dataframe(active_coupons[['code', 'value', 'min_bill']], hide_index=True)
+            
+            # Show Generic Coupons
+            generic_coupons = active_coupons[active_coupons['bound_mobile'].isna() | (active_coupons['bound_mobile'] == 'None')]
+            if not generic_coupons.empty:
+                st.dataframe(generic_coupons[['code', 'value', 'min_bill']], hide_index=True)
             else:
-                st.caption("No Active Coupons")
+                st.caption("No Generic Coupons")
+            
+            # Show Customer Specific Coupons if customer selected
+            if st.session_state.get('current_customer'):
+                cust_mob = st.session_state['current_customer']['mobile']
+                my_coupons = db.get_customer_coupons(cust_mob)
+                if not my_coupons.empty:
+                    st.success(f"🎟️ Coupons for {st.session_state['current_customer']['name']}")
+                    st.dataframe(my_coupons[['code', 'value', 'min_bill']], hide_index=True)
+                    st.caption("Copy code to apply")
             
             st.markdown("---")
             st.warning("🔥 Clearance / Expiry Deals")
@@ -393,7 +405,9 @@ def pos_interface():
                 c_code = st.text_input("Enter Coupon Code")
                 if st.button("Apply Coupon"):
                     try:
-                        cpn, msg = db.get_coupon(c_code)
+                        # FIX 5: Validate Bound Mobile
+                        cust_mobile = st.session_state['current_customer']['mobile'] if st.session_state.get('current_customer') else None
+                        cpn, msg = db.get_coupon(c_code, customer_mobile=cust_mobile)
                         if cpn:
                             if raw_total >= cpn['min_bill']:
                                 st.session_state['applied_coupon'] = cpn
@@ -651,6 +665,7 @@ def pos_interface():
                 st.session_state['points_to_redeem'] = 0
                 st.session_state.pop('upi_txn_ref', None)
                 st.session_state.pop('new_coupon_code', None) # Clear coupon
+                st.session_state.pop('new_coupon_details', None) # Clear coupon details
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -700,13 +715,21 @@ def finalize_sale(total, mode):
         db.log_activity(operator, "Sale Completed", f"Sale #{sale_id} for {currency}{total:.2f}")
         
         # FIX 9: GENERATE COUPON
+        new_coupon_details = None
         if customer_mobile:
             new_code = db.generate_auto_coupon(customer_mobile)
             if new_code:
                 st.session_state['new_coupon_code'] = new_code
+                # Retreive full details to pass to PDF
+                cpn, msg = db.get_coupon(new_code, customer_mobile)
+                if cpn:
+                    new_coupon_details = cpn
+                    st.session_state['new_coupon_details'] = cpn
         
         tax_info = {"tax_amount": calc['tax'], "tax_percent": 18}
-        pdf = utils.generate_receipt_pdf(store_name, sale_id, txn_time, st.session_state['cart'], total, operator, mode, st.session_state['pos_id'], customer, tax_info)
+        
+        # FIX 4: Pass new_coupon details to PDF generator
+        pdf = utils.generate_receipt_pdf(store_name, sale_id, txn_time, st.session_state['cart'], total, operator, mode, st.session_state['pos_id'], customer, tax_info, new_coupon=new_coupon_details)
         
         st.session_state['last_receipt'] = pdf
         st.session_state['checkout_stage'] = 'receipt'
@@ -917,8 +940,11 @@ def analytics_dashboard():
             st.dataframe(pos_summ, use_container_width=True)
             
             # Pivot for better view
-            pivot_pos = pos_summ.pivot(index='pos_id', columns='payment_mode', values='total').fillna(0)
-            st.bar_chart(pivot_pos)
+            try:
+                pivot_pos = pos_summ.pivot(index='pos_id', columns='payment_mode', values='total').fillna(0)
+                st.bar_chart(pivot_pos)
+            except:
+                st.info("Insufficient data for pivot chart.")
         else:
             st.info("No sales data available for breakdown.")
 
@@ -1209,7 +1235,7 @@ def admin_panel():
                     </div>
                     <div style="text-align: right;">
                         <div style="font-weight: bold; color: {border_l};">{status_html}</div>
-                        <div style="font-size: 0.85rem; margin-top: 5px;">Today's Sales: {currency}{row['daily_sales']:,.2f}</div>
+                        <div style="font-size: 0.85rem; margin-top: 5px;">Live Session Sales: {currency}{row['daily_sales']:,.2f}</div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1389,8 +1415,12 @@ def admin_panel():
                 cc_min = st.number_input("Min Bill Amount", min_value=0.0)
                 cc_days = st.number_input("Validity (Days)", min_value=1, value=30)
                 cc_lim = st.number_input("Total Usage Limit", min_value=1, value=100)
+                # Added Bound Mobile
+                cc_mob = st.text_input("Bound to Mobile (Optional)")
+                
                 if st.form_submit_button("Create Coupon"):
-                    if db.create_coupon(cc_code, cc_type, cc_val, cc_min, cc_days, cc_lim):
+                    bound = cc_mob if cc_mob else None
+                    if db.create_coupon(cc_code, cc_type, cc_val, cc_min, cc_days, cc_lim, bound_mobile=bound):
                         st.success("Coupon Created!")
                     else:
                         st.error("Error creating coupon (Code might exist)")
