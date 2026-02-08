@@ -564,6 +564,21 @@ def get_all_terminals():
     conn.close()
     return df
 
+def get_all_terminals_status():
+    """
+    Returns terminals joined with active session data
+    to determine real-time availability.
+    """
+    conn = get_connection()
+    query = """
+    SELECT t.id, t.name, t.location, t.status, s.username as current_user, s.login_time 
+    FROM terminals t
+    LEFT JOIN active_sessions s ON t.id = s.pos_id
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
+
 def get_active_terminal_ids():
     conn = get_connection()
     c = conn.cursor()
@@ -597,6 +612,14 @@ def update_terminal_status(t_id, status):
     conn = get_connection()
     c = conn.cursor()
     c.execute("UPDATE terminals SET status=? WHERE id=?", (status, t_id))
+    conn.commit()
+    conn.close()
+
+def force_unlock_terminal(pos_id):
+    """Forcefully removes a session lock for a specific terminal."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM active_sessions WHERE pos_id=?", (pos_id,))
     conn.commit()
     conn.close()
 
