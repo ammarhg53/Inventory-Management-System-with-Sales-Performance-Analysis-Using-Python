@@ -13,6 +13,7 @@ import shutil
 import os
 import json
 from PIL import Image
+import re
 
 # --- CONDITIONAL IMPORT FOR OPENCV (CLOUD COMPATIBILITY) ---
 try:
@@ -34,6 +35,30 @@ try:
 except (ImportError, OSError):
     tk = None
     ImageTk = None
+
+# --- SYSTEM TIME HELPER ---
+def get_system_time():
+    """Returns current system time. Useful for centralized time sync."""
+    return datetime.now()
+
+# --- SECURITY: PASSWORD STRENGTH ---
+def check_password_strength(password):
+    """
+    Validates password strength.
+    Returns: (score [0-4], label, color)
+    """
+    score = 0
+    if len(password) >= 8: score += 1
+    if re.search(r"[A-Z]", password): score += 1
+    if re.search(r"[a-z]", password): score += 1
+    if re.search(r"\d", password) or re.search(r"[ !@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]", password): score += 1
+    
+    if score == 0: return 0, "Very Weak", "#ef4444"
+    elif score == 1: return 1, "Weak", "#ef4444"
+    elif score == 2: return 2, "Medium", "#f59e0b"
+    elif score == 3: return 3, "Strong", "#10b981"
+    elif score == 4: return 4, "Very Strong", "#059669"
+    return 0, "Unknown", "#ef4444"
 
 # --- REAL-TIME LIVE SCANNER ---
 class LiveBarcodeScanner:
@@ -295,6 +320,9 @@ def get_sound_html(sound_type):
         src = "https://www.soundjay.com/buttons/sounds/button-3.mp3"
     elif sound_type == 'error':
         src = "https://www.soundjay.com/buttons/sounds/button-10.mp3"
+    elif sound_type == 'celebration':
+        # Short cheer/tada sound
+        src = "https://www.soundjay.com/human/sounds/applause-01.mp3"
     else: 
         src = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
         
