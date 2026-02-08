@@ -188,11 +188,11 @@ def init_db():
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
 
     users = [
-        ('ammar', 'admin123', 'Admin', 'Ammar Admin'),
-        ('manager', 'manager123', 'Manager', 'Store Manager'),
-        ('staff', 'staff123', 'Operator', 'Counter Staff 1'),
-        ('staff2', 'staff123', 'Operator', 'Counter Staff 2'),
-        ('inv_man', 'inv123', 'Inventory Manager', 'Logistics Head')
+        ('ammar_admin', 'admin123', 'Admin', 'Ammar Admin'),
+        ('manager_1', 'manager123', 'Manager', 'Store Manager'),
+        ('inv_man', 'inv123', 'Inventory Manager', 'Logistics Head'),
+        ('pos_op_1', 'pos123', 'Operator', 'Counter Staff 1'),
+        ('pos_op_2', 'pos123', 'Operator', 'Counter Staff 2')
     ]
     for u, p, r, n in users:
         ph = hashlib.sha256(p.encode()).hexdigest()
@@ -525,7 +525,13 @@ def get_active_campaigns():
     conn.close()
     return df
 
-def pick_lucky_winner(days_lookback, min_spend):
+def get_all_campaigns():
+    conn = get_connection()
+    df = pd.read_sql("SELECT * FROM campaigns ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+def pick_lucky_winner(days_lookback, min_spend, prize_title="Mystery Gift"):
     start_dt = (datetime.now() - timedelta(days=days_lookback)).strftime("%Y-%m-%d")
     conn = get_connection()
     query = f"""
@@ -546,7 +552,7 @@ def pick_lucky_winner(days_lookback, min_spend):
         
         c = conn.cursor()
         c.execute("INSERT INTO lucky_draws (draw_date, winner_name, winner_mobile, prize, criteria) VALUES (?, ?, ?, ?, ?)",
-                  (datetime.now().strftime("%Y-%m-%d"), winner['name'], winner['mobile'], "Mystery Gift", f"Spend > {min_spend}"))
+                  (datetime.now().strftime("%Y-%m-%d"), winner['name'], winner['mobile'], prize_title, f"Spend > {min_spend}"))
         conn.commit()
         
     conn.close()
@@ -758,6 +764,70 @@ def get_sales_data():
     conn.close()
     return df
 
+# --- NEW ANALYTICS QUERIES ---
+
+def get_employee_activity_live():
+    """Returns dataframe of all employees with live status from active_sessions."""
+    conn = get_connection()
+    query = """
+    SELECT u.username, u.full_name, u.role, 
+           s.pos_id as current_pos, s.login_time
+    FROM users u
+    LEFT JOIN active_sessions s ON u.username = s.username
+    WHERE u.role != 'Admin'
+    """
+    df = pd.read_sql(query, conn)
+    
+    # Calculate today's sales for each user
+    today_start = datetime.now().strftime("%Y-%m-%d")
+    sales_query = """
+    SELECT operator, SUM(total_amount) as daily_sales
+    FROM sales
+    WHERE timestamp >= ? AND status != 'Cancelled'
+    GROUP BY operator
+    """
+    sales_df = pd.read_sql(sales_query, conn, params=(today_start,))
+    
+    conn.close()
+    
+    if not df.empty and not sales_df.empty:
+        df = df.merge(sales_df, left_on='username', right_on='operator', how='left')
+        df['daily_sales'] = df['daily_sales'].fillna(0)
+    else:
+        df['daily_sales'] = 0
+        
+    return df
+
+def get_pos_collection_stats():
+    """Aggregates revenue by POS ID and Payment Mode."""
+    conn = get_connection()
+    query = """
+    SELECT pos_id, payment_mode, SUM(total_amount) as total
+    FROM sales
+    WHERE status != 'Cancelled'
+    GROUP BY pos_id, payment_mode
+    ORDER BY pos_id
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
+
+def get_employee_performance_stats():
+    """Aggregates performance metrics per operator."""
+    conn = get_connection()
+    query = """
+    SELECT operator, 
+           COUNT(*) as txn_count, 
+           SUM(total_amount) as total_revenue, 
+           AVG(time_taken) as avg_speed,
+           SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END) as cancelled_orders
+    FROM sales
+    GROUP BY operator
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
+
 def seed_advanced_demo_data():
     conn = get_connection()
     c = conn.cursor()
@@ -792,7 +862,7 @@ def seed_advanced_demo_data():
                           (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
     
     demo_users = [
-        ('ammar_admin', 'admin123', 'Admin', 'Ammar Husain'),
+        ('ammar_admin', 'admin123', 'Admin', 'Ammar Admin'),
         ('manager_1', 'manager123', 'Manager', 'Sarah Manager'),
         ('manager_2', 'manager123', 'Manager', 'Mike Manager'),
         ('pos_op_1', 'pos123', 'Operator', 'Alice Operator'),
