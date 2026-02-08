@@ -45,7 +45,7 @@ def init_db():
                   is_dead_stock TEXT DEFAULT 'False',
                   image_data BLOB)''')
     
-    # FIX 4 & 7: Added cancellation_reason and cancelled_by
+    # FIX 4 & 7: Added cancellation_reason, cancelled_by, cancellation_timestamp
     c.execute('''CREATE TABLE IF NOT EXISTS sales
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, 
@@ -63,7 +63,8 @@ def init_db():
                   coupon_applied TEXT,
                   points_redeemed INTEGER DEFAULT 0,
                   cancellation_reason TEXT,
-                  cancelled_by TEXT)''')
+                  cancelled_by TEXT,
+                  cancellation_timestamp TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings
                  (key TEXT PRIMARY KEY, value TEXT)''')
@@ -169,6 +170,8 @@ def init_db():
     try: c.execute("ALTER TABLE sales ADD COLUMN cancellation_reason TEXT")
     except: pass
     try: c.execute("ALTER TABLE sales ADD COLUMN cancelled_by TEXT")
+    except: pass
+    try: c.execute("ALTER TABLE sales ADD COLUMN cancellation_timestamp TEXT")
     except: pass
     
     # FIX: Coupon Binding
@@ -300,51 +303,108 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
     finally:
         conn.close()
 
-# --- FIX 7: ROLE-BASED ORDER CANCELLATION ---
-def cancel_sale_transaction(sale_id, operator, role, reason):
+# --- FIX 7: SECURE ROLE-BASED ORDER CANCELLATION ---
+def cancel_sale_transaction(sale_id, operator, role, reason, password):
     """
-    Enhanced Undo Logic:
-    - Checks role permissions
-    - Requires reason
-    - Updates cancelled_by and cancellation_reason
-    - Restores Inventory
+    Enhanced Undo Logic with Security & Fraud Detection:
+    1. Verifies User Password.
+    2. Checks Role Permissions.
+    3. Runs Fraud Detection (Frequency, Time, Value).
+    4. Restores Inventory.
+    5. Reverses Financials (marks as Cancelled).
     """
+    if not reason or len(reason.strip()) < 3:
+        return False, "Cancellation reason is mandatory and must be descriptive."
+
     conn = get_connection()
     c = conn.cursor()
+    
     try:
-        c.execute("SELECT items_json, status, operator FROM sales WHERE id=?", (sale_id,))
+        # 1. Password Verification
+        ph = hashlib.sha256(password.encode()).hexdigest()
+        c.execute("SELECT 1 FROM users WHERE username=? AND password_hash=?", (operator, ph))
+        if not c.fetchone():
+            return False, "Invalid Password. Identity verification failed."
+
+        # 2. Get Sale Details
+        c.execute("SELECT items_json, status, operator, total_amount, timestamp FROM sales WHERE id=?", (sale_id,))
         res = c.fetchone()
         if not res:
             return False, "Sale ID not found"
         
-        items_json_str, status, sale_operator = res
+        items_json_str, status, sale_operator, total_amount, sale_timestamp_str = res
         
         if status == 'Cancelled':
             return False, "Sale already cancelled"
             
-        # Permission Check
+        # 3. Permission Check
         if role == 'Operator' and sale_operator != operator:
-            return False, "Permission Denied: Operators can only cancel their own sales."
+            return False, "Permission Denied: POS Operators can only cancel their own sales."
 
-        items_ids = json.loads(items_json_str)
+        # 4. Fraud Detection
+        risk_flags = []
         
+        # Rule A: Value Threshold (> 5000)
+        if total_amount > 5000:
+            risk_flags.append("High Value")
+            
+        # Rule B: Time (Immediate Cancellation < 5 mins)
+        try:
+            sale_dt = datetime.strptime(sale_timestamp_str, "%Y-%m-%d %H:%M:%S")
+            now_dt = datetime.now()
+            if (now_dt - sale_dt).total_seconds() < 300: # 5 mins
+                risk_flags.append("Immediate Reversal")
+        except: pass
+        
+        # Rule C: Frequency (More than 3 cancellations today)
+        today_start = datetime.now().strftime("%Y-%m-%d")
+        c.execute("SELECT count(*) FROM logs WHERE user=? AND action LIKE '%Undo Sale%' AND timestamp >= ?", (operator, today_start))
+        cancel_count = c.fetchone()[0]
+        if cancel_count >= 3:
+            risk_flags.append("High Frequency")
+
+        risk_score = "Low"
+        if risk_flags:
+            risk_score = "High (" + ", ".join(risk_flags) + ")"
+            reason = f"[RISK: {risk_score}] {reason}"
+
+        # 5. Restore Inventory
+        items_ids = json.loads(items_json_str)
         for pid in items_ids:
             c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
             
-        c.execute("""UPDATE sales SET status = 'Cancelled', cancellation_reason = ?, cancelled_by = ? 
-                     WHERE id=?""", (reason, operator, sale_id))
+        # 6. Update Sale Record
+        cancel_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""UPDATE sales SET status = 'Cancelled', cancellation_reason = ?, cancelled_by = ?, cancellation_timestamp = ? 
+                     WHERE id=?""", (reason, operator, cancel_time, sale_id))
         
+        # 7. Audit Log
+        log_msg = f"Cancelled Sale #{sale_id}. Value: {total_amount}. Reason: {reason}. Risk: {risk_score}"
         c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
-                  (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Undo Sale", 
-                   f"Cancelled Sale #{sale_id}. Reason: {reason}"))
+                  (cancel_time, operator, "Undo Sale", log_msg))
         
         conn.commit()
-        return True, "Success"
+        return True, f"Success. Order cancelled. Risk Level: {risk_score}"
+        
     except Exception as e:
         conn.rollback()
         return False, str(e)
     finally:
         conn.close()
+
+def get_cancellation_audit_log():
+    """Returns a specialized view for cancellation audits."""
+    conn = get_connection()
+    query = """
+    SELECT id as Sale_ID, pos_id, operator as Original_Operator, cancelled_by, 
+           total_amount as Reversed_Amount, cancellation_reason, cancellation_timestamp, timestamp as Original_Time
+    FROM sales 
+    WHERE status = 'Cancelled'
+    ORDER BY cancellation_timestamp DESC
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
 
 def redo_sale_transaction(sale_id, operator):
     conn = get_connection()
@@ -362,7 +422,7 @@ def redo_sale_transaction(sale_id, operator):
         for pid in items_ids:
             c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (pid,))
             
-        c.execute("UPDATE sales SET status = 'Completed', cancellation_reason=NULL, cancelled_by=NULL WHERE id=?", (sale_id,))
+        c.execute("UPDATE sales SET status = 'Completed', cancellation_reason=NULL, cancelled_by=NULL, cancellation_timestamp=NULL WHERE id=?", (sale_id,))
         
         c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
                   (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), operator, "Redo Sale", f"Restored Sale #{sale_id}"))
