@@ -271,35 +271,85 @@ def pos_interface():
                     st.caption("No Clearance Items")
         
         with st.expander("👤 Customer Details (Required for Bill)", expanded=st.session_state['current_customer'] is None):
-            col_c1, col_c2 = st.columns([2, 1])
-            with col_c1:
-                cust_phone = st.text_input("Customer Mobile", value=st.session_state['current_customer']['mobile'] if st.session_state['current_customer'] else "").strip()
-            with col_c2:
-                st.write("")
-                st.write("")
-                if st.button("🔎 Search / Add"):
-                    st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
-                    if cust_phone:
-                        cust = db.get_customer(cust_phone)
-                        if cust:
-                            st.session_state['current_customer'] = cust
-                            st.success(f"Welcome back, {cust['name']} ({cust['segment']} Member)")
-                            st.caption(f"Loyalty Points: {cust['loyalty_points']}")
-                        else:
-                            st.session_state['temp_new_customer'] = cust_phone
-                            st.warning("New Customer! Please enter details below.")
+            col_cc, col_mob, col_search = st.columns([1, 2, 1])
             
-            if st.session_state.get('temp_new_customer') == cust_phone and not st.session_state['current_customer']:
+            with col_cc:
+                country_code = st.selectbox("Code", ["+91 (IN)", "+1 (US)", "+44 (UK)", "+971 (UAE)"], key="cust_cc")
+                cc_val = country_code.split(" ")[0]
+
+            with col_mob:
+                # Pre-fill logic: if customer is selected, strip CC for display if it matches
+                default_val = ""
+                if st.session_state.get('current_customer'):
+                    full_num = st.session_state['current_customer']['mobile']
+                    if full_num.startswith(cc_val):
+                        default_val = full_num[len(cc_val):]
+                    else:
+                        default_val = full_num # Fallback
+                
+                mobile_input = st.text_input("Mobile Number", value=default_val, key="cust_mob_in", max_chars=15).strip()
+
+            with col_search:
+                st.write("")
+                st.write("")
+                search_clicked = st.button("🔎 Search / Add")
+
+            # --- VALIDATION & SEARCH LOGIC ---
+            if search_clicked:
+                st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
+                
+                # 2️⃣ MOBILE NUMBER VALIDATION
+                is_valid = True
+                err_msg = ""
+                
+                if not mobile_input:
+                    is_valid = False
+                    err_msg = "Please enter a mobile number."
+                elif cc_val == "+91":
+                    if not mobile_input.isdigit():
+                        is_valid = False
+                        err_msg = "Invalid mobile number. Please enter a valid Indian number (digits only)."
+                    elif len(mobile_input) != 10:
+                        is_valid = False
+                        err_msg = "Invalid mobile number. Please enter a valid Indian number (10 digits)."
+                    elif mobile_input[0] not in ['6', '7', '8', '9']:
+                        is_valid = False
+                        err_msg = "Invalid mobile number. Please enter a valid Indian number (start with 6-9)."
+                
+                if not is_valid:
+                    # 4️⃣ USER FEEDBACK (Invalid)
+                    st.error(f"❌ {err_msg}")
+                else:
+                    # Append Country Code
+                    final_mobile = f"{cc_val}{mobile_input}"
+                    
+                    # 3️⃣ DUPLICATE PREVENTION (Existing Logic)
+                    cust = db.get_customer(final_mobile)
+                    if cust:
+                        st.session_state['current_customer'] = cust
+                        # 4️⃣ USER FEEDBACK (Valid)
+                        st.success(f"✅ Customer verified successfully: {cust['name']}")
+                        st.caption(f"Loyalty Points: {cust['loyalty_points']}")
+                    else:
+                        st.session_state['temp_new_customer'] = final_mobile
+                        st.warning("New Customer! Please enter details below.")
+
+            # Form for New Customer
+            current_full_mobile = f"{cc_val}{mobile_input}"
+            
+            if st.session_state.get('temp_new_customer') == current_full_mobile and not st.session_state.get('current_customer'):
                 with st.form("new_cust_form"):
+                    st.write(f"Creating account for: **{current_full_mobile}**")
                     new_name = st.text_input("Full Name")
                     new_email = st.text_input("Email (Optional)")
                     if st.form_submit_button("Save Customer"):
                         if new_name:
-                            db.upsert_customer(cust_phone, new_name, new_email)
-                            st.session_state['current_customer'] = db.get_customer(cust_phone)
+                            # 5️⃣ DATA SAFETY: Save valid number
+                            db.upsert_customer(current_full_mobile, new_name, new_email)
+                            st.session_state['current_customer'] = db.get_customer(current_full_mobile)
                             st.session_state.pop('temp_new_customer', None)
                             st.markdown(utils.get_sound_html('success'), unsafe_allow_html=True)
-                            st.success("Customer Added!")
+                            st.success("✅ Customer Verified & Added!")
                             st.rerun()
                         else:
                             st.markdown(utils.get_sound_html('error'), unsafe_allow_html=True)
