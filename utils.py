@@ -60,6 +60,51 @@ def check_password_strength(password):
     elif score == 4: return 4, "Very Strong", "#059669"
     return 0, "Unknown", "#ef4444"
 
+# --- MOBILE VALIDATION (COUNTRY SPECIFIC) ---
+def validate_mobile_number(number_str, country_code):
+    """
+    Validates mobile number based on country specific rules.
+    Returns: (is_valid, normalized_number, message)
+    """
+    if not number_str or not number_str.isdigit():
+        return False, None, "Mobile number must contain digits only."
+        
+    clean_num = number_str.strip()
+    
+    if country_code == "+91": # India
+        if len(clean_num) != 10:
+            return False, None, "India (+91) numbers must be exactly 10 digits."
+        if int(clean_num[0]) < 6:
+            return False, None, "India (+91) numbers must start with 6, 7, 8, or 9."
+            
+    elif country_code == "+971": # UAE
+        if len(clean_num) != 9:
+            return False, None, "UAE (+971) numbers must be exactly 9 digits."
+        if not clean_num.startswith("5"):
+            return False, None, "UAE (+971) numbers must start with 5."
+            
+    elif country_code == "+965": # Kuwait
+        if len(clean_num) != 8:
+            return False, None, "Kuwait (+965) numbers must be exactly 8 digits."
+        if clean_num[0] not in ['5', '6', '9']:
+            return False, None, "Kuwait (+965) numbers must start with 5, 6, or 9."
+            
+    elif country_code == "+966": # Saudi Arabia
+        if len(clean_num) != 9:
+            return False, None, "Saudi Arabia (+966) numbers must be exactly 9 digits."
+        if not clean_num.startswith("5"):
+            return False, None, "Saudi Arabia (+966) numbers must start with 5."
+            
+    elif country_code == "+1": # USA
+        if len(clean_num) != 10:
+            return False, None, "USA (+1) numbers must be exactly 10 digits."
+        if clean_num[0] in ['0', '1']:
+            return False, None, "USA (+1) area code cannot start with 0 or 1."
+            
+    # E.164 Normalization
+    normalized = f"{country_code}{clean_num}"
+    return True, normalized, "Valid"
+
 # --- REAL-TIME LIVE SCANNER ---
 class LiveBarcodeScanner:
     def __init__(self):
