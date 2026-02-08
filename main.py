@@ -75,13 +75,21 @@ def login_view():
         st.markdown("### 🖥️ POS Status")
         st.caption("Live Terminal Availability")
         
-        terminals = db.get_all_terminals()
+        # Use new status function to show real-time locks
+        terminals = db.get_all_terminals_status()
         
         for index, row in terminals.iterrows():
+            is_locked = pd.notna(row['current_user']) and row['current_user'] != ''
+            
             if row['status'] == 'Active':
-                status_color = "#10b981" 
-                status_icon = "🟢"
-                status_text = "Online"
+                if is_locked:
+                    status_color = "#f59e0b" # Yellow
+                    status_icon = "🔒"
+                    status_text = f"In Use ({row['current_user']})"
+                else:
+                    status_color = "#10b981" # Green
+                    status_icon = "🟢"
+                    status_text = "Online"
             elif row['status'] == 'Maintenance':
                 status_color = "#f59e0b" 
                 status_icon = "🟡"
@@ -1203,12 +1211,12 @@ def admin_panel():
                     if st.form_submit_button("Create Terminal"):
                         if db.add_terminal(nt_id, nt_name, nt_loc): st.success("Terminal Added"); st.rerun()
                         else: st.error("Error creating terminal")
-            terms = db.get_all_terminals()
             
-            # POINT 4: MULTI-POS TERMINAL STATS
+            # --- FIX: USE STATUS-AWARE DATAFRAME FOR ADMIN CONTROL ---
+            terms_status = db.get_all_terminals_status()
             stats_df = db.get_terminal_stats()
             
-            for _, t in terms.iterrows():
+            for _, t in terms_status.iterrows():
                 with st.container():
                     c1, c2, c3 = st.columns([3, 1, 1])
                     
@@ -1223,6 +1231,15 @@ def admin_panel():
                     c1.write(f"**{t['name']}** ({t['id']}) - {t['location']}")
                     c1.caption(f"Orders: {cnt} | Revenue: {currency}{rev:,.2f}")
                     
+                    # Show active session details if locked
+                    if pd.notna(t['current_user']) and t['current_user'] != '':
+                         c1.warning(f"🔒 Locked by **{t['current_user']}** since {t['login_time']}")
+                         if c1.button(f"🔓 Force Unlock {t['id']}", key=f"unlock_{t['id']}"):
+                             db.force_unlock_terminal(t['id'])
+                             st.success(f"{t['id']} unlocked!")
+                             time.sleep(0.5)
+                             st.rerun()
+
                     new_status = c2.selectbox("Status", ["Active", "Maintenance", "Error"], index=["Active", "Maintenance", "Error"].index(t['status']), key=f"status_{t['id']}")
                     if new_status != t['status']:
                         db.update_terminal_status(t['id'], new_status)
