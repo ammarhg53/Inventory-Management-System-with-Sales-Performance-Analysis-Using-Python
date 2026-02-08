@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import os
 
 # Internal modules
-import database as db
+import db_core as db
 import utils
 import styles
 
@@ -800,8 +800,6 @@ def pos_interface():
             if st.button("Select UPI", use_container_width=True):
                 st.session_state['selected_payment_mode'] = 'UPI'
                 st.session_state['checkout_stage'] = 'payment_process'
-                st.session_state['qr_expiry'] = None 
-                st.session_state.pop('upi_txn_ref', None) 
                 st.markdown(utils.get_sound_html('click'), unsafe_allow_html=True)
                 st.rerun()
         with c3:
