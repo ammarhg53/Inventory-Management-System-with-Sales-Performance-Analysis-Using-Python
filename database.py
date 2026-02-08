@@ -117,7 +117,8 @@ def init_db():
                   min_bill REAL, 
                   valid_until TEXT, 
                   usage_limit INTEGER, 
-                  used_count INTEGER DEFAULT 0)''')
+                  used_count INTEGER DEFAULT 0,
+                  bound_mobile TEXT)''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS campaigns
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -168,6 +169,10 @@ def init_db():
     try: c.execute("ALTER TABLE sales ADD COLUMN cancellation_reason TEXT")
     except: pass
     try: c.execute("ALTER TABLE sales ADD COLUMN cancelled_by TEXT")
+    except: pass
+    
+    # FIX: Coupon Binding
+    try: c.execute("ALTER TABLE coupons ADD COLUMN bound_mobile TEXT")
     except: pass
 
     # REMOVED: c.execute("DELETE FROM active_sessions") to allow persistent locks
@@ -459,39 +464,63 @@ def verify_password(username, password):
     conn.close()
     return res is not None
 
-def create_coupon(code, dtype, value, min_bill, days_valid, limit):
+# --- FIX: COUPON BINDING ---
+def create_coupon(code, dtype, value, min_bill, days_valid, limit, bound_mobile=None):
     valid_until = (datetime.now() + timedelta(days=days_valid)).strftime("%Y-%m-%d")
     conn = get_connection()
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO coupons (code, discount_type, value, min_bill, valid_until, usage_limit) VALUES (?, ?, ?, ?, ?, ?)",
-                  (code, dtype, value, min_bill, valid_until, limit))
+        c.execute("INSERT INTO coupons (code, discount_type, value, min_bill, valid_until, usage_limit, bound_mobile) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (code, dtype, value, min_bill, valid_until, limit, bound_mobile))
         conn.commit()
         return True
     except: return False
     finally: conn.close()
 
-def get_coupon(code):
+def get_coupon(code, customer_mobile=None):
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM coupons WHERE code=?", (code,))
     c_data = c.fetchone()
     conn.close()
     if c_data:
+        # columns: 0:code, 1:type, 2:value, 3:min, 4:expiry, 5:limit, 6:used, 7:bound_mobile
         expiry = c_data[4]
         limit = c_data[5]
         used = c_data[6]
+        bound_mobile = c_data[7] if len(c_data) > 7 else None
         
         if datetime.now() > datetime.strptime(expiry, "%Y-%m-%d"):
             return None, "Expired"
         if used >= limit:
             return None, "Usage Limit Reached"
         
+        # Validation for Customer Binding
+        if bound_mobile and bound_mobile != 'None':
+             if not customer_mobile:
+                 return None, "Customer identification required for this coupon"
+             if bound_mobile.strip() != customer_mobile.strip():
+                 return None, "Coupon not valid for this customer"
+        
         return {
             "code": c_data[0], "type": c_data[1], "value": c_data[2],
-            "min_bill": c_data[3]
+            "min_bill": c_data[3], "bound_mobile": bound_mobile, "expiry": expiry
         }, "Valid"
     return None, "Invalid Code"
+
+def get_customer_coupons(mobile):
+    """Retrieves all active coupons bound to a customer."""
+    if not mobile: return pd.DataFrame()
+    conn = get_connection()
+    now_str = datetime.now().strftime("%Y-%m-%d")
+    query = """
+    SELECT code, discount_type, value, min_bill, valid_until 
+    FROM coupons 
+    WHERE bound_mobile = ? AND valid_until >= ? AND used_count < usage_limit
+    """
+    df = pd.read_sql(query, conn, params=(mobile, now_str))
+    conn.close()
+    return df
 
 def get_all_coupons():
     conn = get_connection()
@@ -499,14 +528,18 @@ def get_all_coupons():
     conn.close()
     return df
 
-# --- FIX 9: AUTOMATED COUPON GENERATION ---
+# --- FIX 9: AUTOMATED COUPON GENERATION WITH BINDING ---
 def generate_auto_coupon(customer_mobile):
-    """Generates a personalized coupon after a sale."""
+    """Generates a personalized coupon after a sale bound to the customer."""
     if not customer_mobile: return None
     
-    code = f"SAVE10-{random.randint(1000,9999)}"
-    # Simple rule: 10% off for next visit, valid 30 days
-    if create_coupon(code, "%", 10.0, 500.0, 30, 1):
+    # Personalized Code
+    suffix = customer_mobile[-4:] if len(customer_mobile) >= 4 else "0000"
+    rand_tag = random.randint(10, 99)
+    code = f"LOYALTY-{suffix}-{rand_tag}"
+    
+    # 10% off for next visit, valid 30 days, Bound to Customer
+    if create_coupon(code, "%", 10.0, 500.0, 30, 1, bound_mobile=customer_mobile):
         return code
     return None
 
@@ -739,8 +772,12 @@ def lock_terminal(pos_id, username, role):
     lock_key = pos_id
     if pos_id == "Office Dashboard":
         lock_key = f"Office_{username}_{random.randint(1000,9999)}"
+    
+    # FIX: Store FULL timestamp for session tracking
+    login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     c.execute("INSERT OR REPLACE INTO active_sessions (pos_id, username, login_time, role) VALUES (?, ?, ?, ?)",
-              (lock_key, username, datetime.now().strftime("%H:%M:%S"), role))
+              (lock_key, username, login_time, role))
     conn.commit()
     conn.close()
 
@@ -769,44 +806,59 @@ def get_sales_data():
 def get_employee_activity_live():
     """Returns dataframe of all employees with live status from active_sessions."""
     conn = get_connection()
-    query = """
+    
+    # Get all users and their active session info
+    query_users = """
     SELECT u.username, u.full_name, u.role, 
            s.pos_id as current_pos, s.login_time
     FROM users u
     LEFT JOIN active_sessions s ON u.username = s.username
     WHERE u.role != 'Admin'
     """
-    df = pd.read_sql(query, conn)
+    df_users = pd.read_sql(query_users, conn)
     
-    # Calculate today's sales for each user
-    today_start = datetime.now().strftime("%Y-%m-%d")
-    sales_query = """
-    SELECT operator, SUM(total_amount) as daily_sales
-    FROM sales
-    WHERE timestamp >= ? AND status != 'Cancelled'
-    GROUP BY operator
-    """
-    sales_df = pd.read_sql(sales_query, conn, params=(today_start,))
+    # Calculate Session-Based Collection
+    # We iterate because for active users we want sales > session_start_time
+    live_sales = []
     
+    for _, row in df_users.iterrows():
+        username = row['username']
+        login_time = row['login_time']
+        
+        if pd.notna(login_time) and login_time:
+            # For active users, sum sales since login
+            sql = "SELECT SUM(total_amount) FROM sales WHERE operator=? AND timestamp >= ? AND status != 'Cancelled'"
+            params = (username, login_time)
+        else:
+            # For inactive users, show 0 (Session ended)
+            sql = "SELECT 0" # Or could show today's total, but request said "Live session-based"
+            params = ()
+            
+        c = conn.cursor()
+        c.execute(sql, params)
+        res = c.fetchone()
+        amount = res[0] if res and res[0] else 0.0
+        live_sales.append(amount)
+        c.close()
+    
+    df_users['daily_sales'] = live_sales
     conn.close()
     
-    if not df.empty and not sales_df.empty:
-        df = df.merge(sales_df, left_on='username', right_on='operator', how='left')
-        df['daily_sales'] = df['daily_sales'].fillna(0)
-    else:
-        df['daily_sales'] = 0
-        
-    return df
+    return df_users
 
 def get_pos_collection_stats():
-    """Aggregates revenue by POS ID and Payment Mode."""
+    """
+    Aggregates revenue by POS ID and Payment Mode.
+    FIX: Left joins from terminals to ensure ALL POS IDs are shown.
+    """
     conn = get_connection()
     query = """
-    SELECT pos_id, payment_mode, SUM(total_amount) as total
-    FROM sales
-    WHERE status != 'Cancelled'
-    GROUP BY pos_id, payment_mode
-    ORDER BY pos_id
+    SELECT t.id as pos_id, s.payment_mode, SUM(s.total_amount) as total
+    FROM terminals t
+    LEFT JOIN sales s ON t.id = s.pos_id AND s.status != 'Cancelled'
+    WHERE t.id != 'Office Dashboard'
+    GROUP BY t.id, s.payment_mode
+    ORDER BY t.id
     """
     df = pd.read_sql(query, conn)
     conn.close()
